@@ -1,0 +1,22 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "{36A20F4E-4A03-2484-733C-A48E5194CC30}",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "MarbleRace",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
+}

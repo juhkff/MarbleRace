@@ -14,6 +14,14 @@ class MARBLERACE_API AMarbleRaceGameMode : public AGameModeBase
 {
 	GENERATED_BODY()
 
+public:
+	AMarbleRaceGameMode();
+	virtual void Tick(float DeltaSeconds) override;
+
 protected:
 	virtual void BeginPlay() override;
+
+private:
+	TWeakObjectPtr<class ACameraActor> FollowCamera;
+	TWeakObjectPtr<AActor> RaceMarble;
 };

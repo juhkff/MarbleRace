@@ -8,7 +8,7 @@ public class MarbleRace : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(["Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput"]);
+		PublicDependencyModuleNames.AddRange(["Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "Slate", "SlateCore", "AssetRegistry", "PhysicsCore"]);
 
 		PrivateDependencyModuleNames.AddRange([]);
 

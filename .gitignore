@@ -5,6 +5,9 @@ Intermediate/
 Saved/
 .vs/
 
+# 建模模式布尔、圆柱等临时网格。正式网格另存在 Content/Meshes。
+Content/**/_GENERATED/
+
 # IDE and editor files
 .idea/
 .vscode/

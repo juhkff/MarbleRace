@@ -1127,7 +1127,12 @@ void AMarbleRaceMenuHUD::DrawMainMenuPage(float ScreenWidth, float ScreenHeight)
 		ButtonFontSize, false))
 	{
 		CommitFocusedText();
-		UGameplayStatics::OpenLevel(this, RaceLevelName);
+		// 这张关卡自己没指定模式时，全局默认仍是主菜单，画面会继续被菜单盖住。
+		UGameplayStatics::OpenLevel(
+			this,
+			RaceLevelName,
+			true,
+			TEXT("game=/Script/MarbleRace.MarbleRaceLevelGameMode"));
 		return;
 	}
 	ButtonY += ButtonHeight + MarbleRaceMenuLayout::Gap;

@@ -46,9 +46,9 @@ public:
 
 	virtual void DrawHUD() override;
 
-	/** “开始游戏”要打开的关卡。资产在 /Game/Maps/NewMap。 */
+	/** “开始游戏”要打开的关卡。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="菜单", meta=(DisplayName="比赛关卡名"))
-	FName RaceLevelName = FName(TEXT("/Game/Maps/NewMap"));
+	FName RaceLevelName = FName(TEXT("/Game/Maps/MainContent"));
 
 	/** 主菜单上的大标题。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="菜单", meta=(DisplayName="标题"))

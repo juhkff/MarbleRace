@@ -9,6 +9,7 @@ URingSpinComponent::URingSpinComponent()
 	// Set this component to be initialized when the game starts, and to be ticked every frame.  You can turn these features
 	// off to improve performance if you don't need them.
 	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 	SetMobility(EComponentMobility::Movable);
 }
 
@@ -18,7 +19,10 @@ void URingSpinComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// ...
+	if (USceneComponent* Parent = GetAttachParent())
+	{
+		Parent->SetMobility(EComponentMobility::Movable);
+	}
 }
 
 

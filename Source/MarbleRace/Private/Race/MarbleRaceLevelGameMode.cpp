@@ -22,7 +22,7 @@ namespace
 	const float LeadStickiness = 40.f;
 
 	/** 在滚筒洞里排开，避免出生时叠在一起。 */
-	FVector MarbleOffsetInDrum(int32 Index, int32 Count, float Radius)
+	FVector MarbleOffsetInDrum(const int32 Index, const int32 Count, const float Radius)
 	{
 		if (Count <= 1 || Radius <= KINDA_SMALL_NUMBER)
 		{
@@ -77,7 +77,7 @@ void AMarbleRaceLevelGameMode::BeginPlay()
 
 	SecondsLeft = FMath::Max(1, CountdownSeconds);
 	ShowCountdown(SecondsLeft);
-	if (UWorld* World = GetWorld())
+	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().SetTimer(
 			CountdownTimer, this, &AMarbleRaceLevelGameMode::AdvanceCountdown, 1.f, true);
@@ -86,7 +86,7 @@ void AMarbleRaceLevelGameMode::BeginPlay()
 
 void AMarbleRaceLevelGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (UWorld* World = GetWorld())
+	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(CountdownTimer);
 	}
@@ -211,7 +211,9 @@ void AMarbleRaceLevelGameMode::SpawnMarblesInDrum()
 	for (int32 Slot = 0; Slot < EnabledIndices.Num(); ++Slot)
 	{
 		const FRaceCharacterEntry& Entry = Entries[EnabledIndices[Slot]];
-		const FVector Location = DrumOrigin + MarbleOffsetInDrum(Slot, EnabledIndices.Num(), HoleRadius);
+		FVector Location = DrumOrigin + MarbleOffsetInDrum(Slot, EnabledIndices.Num(), HoleRadius);
+		// 包围盒中心落在滚筒厚度中间（Y=25）。侧视平面是 Y=0。
+		Location.Y = 0.f;
 		AActor* Marble = World->SpawnActor<AActor>(MarbleClass, Location, FRotator::ZeroRotator, SpawnParams);
 		if (!Marble)
 		{
@@ -361,7 +363,7 @@ AActor* AMarbleRaceLevelGameMode::FindLeadingMarble() const
 	return Best;
 }
 
-void AMarbleRaceLevelGameMode::FollowLeader(const AActor* Leader, const float DeltaSeconds)
+void AMarbleRaceLevelGameMode::FollowLeader(const AActor* Leader, const float DeltaSeconds) const
 {
 	if (!FollowCamera || !Leader)
 	{
@@ -373,8 +375,7 @@ void AMarbleRaceLevelGameMode::FollowLeader(const AActor* Leader, const float De
 	float SmoothedZ = FMath::FInterpTo(CurrentZ, TargetZ, DeltaSeconds, CameraFollowSpeed);
 
 	const float MaxLag = FMath::Max(200.f, CameraOrthoWidth * 0.22f);
-	const float LagZ = SmoothedZ - TargetZ;
-	if (FMath::Abs(LagZ) > MaxLag)
+	if (const float LagZ = SmoothedZ - TargetZ; FMath::Abs(LagZ) > MaxLag)
 	{
 		SmoothedZ = TargetZ + FMath::Sign(LagZ) * MaxLag;
 	}

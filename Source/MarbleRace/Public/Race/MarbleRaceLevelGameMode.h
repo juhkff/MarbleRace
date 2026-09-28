@@ -20,11 +20,12 @@ class MARBLERACE_API AMarbleRaceLevelGameMode : public AGameModeBase
 
 public:
 	AMarbleRaceLevelGameMode();
+	
+	virtual void Tick(float DeltaSeconds) override;
 
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	virtual void Tick(float DeltaSeconds) override;
 
 	UPROPERTY(EditDefaultsOnly, Category="开局", meta=(DisplayName="弹珠类"))
 	TSubclassOf<AActor> MarbleClass;
@@ -53,7 +54,7 @@ private:
 	void MarkFinishedMarbles();
 	bool HasFinished(const AActor* Marble) const;
 	AActor* FindLeadingMarble() const;
-	void FollowLeader(const AActor* Leader, float DeltaSeconds);
+	void FollowLeader(const AActor* Leader, float DeltaSeconds) const;
 
 	UPROPERTY()
 	TArray<TObjectPtr<AActor>> Drums;

@@ -20,7 +20,7 @@ class MARBLERACE_API AMarbleRaceLevelGameMode : public AGameModeBase
 
 public:
 	AMarbleRaceLevelGameMode();
-	
+
 	virtual void Tick(float DeltaSeconds) override;
 
 protected:

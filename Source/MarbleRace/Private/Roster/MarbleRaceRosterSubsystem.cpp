@@ -26,7 +26,7 @@ namespace
 	constexpr int32 GRacePaletteSize = UE_ARRAY_COUNT(GRacePalette);
 
 	/** 数量够填满滚筒，第一次运行不用先做设置。 */
-	constexpr int32 GDefaultEntryCount = 6;
+	constexpr int32 GDefaultEntryCount = 30;
 }
 
 FLinearColor UMarbleRaceRosterSubsystem::GetPaletteColor(int32 PaletteIndex)

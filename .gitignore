@@ -3,6 +3,8 @@ Binaries/
 DerivedDataCache/
 Intermediate/
 Saved/
+# 本地角色名单和其他运行时存档
+*.sav
 .vs/
 
 # 编辑器打开材质预览时自动写入的光照配置，每台机器都会改。

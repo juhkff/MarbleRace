@@ -23,9 +23,9 @@ public:
 	UPROPERTY(EditAnywhere, Category="平板", meta=(DisplayName="周期", ClampMin="0.1", ForceUnits="s"))
 	float Period = 4.f;
 
-protected:
 	virtual void BeginPlay() override;
-	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+	                           FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
 	FVector Origin = FVector::ZeroVector;

@@ -21,7 +21,6 @@ public:
 	UPROPERTY(EditAnywhere, Category="圆环", meta=(DisplayName="转轴"))
 	TEnumAsByte<EAxis::Type> SpinAxis = EAxis::Z;
 
-protected:
 	// Called when the game starts
 	virtual void BeginPlay() override;
 

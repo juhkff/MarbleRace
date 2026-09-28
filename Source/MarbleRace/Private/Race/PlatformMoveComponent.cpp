@@ -4,7 +4,7 @@ UPlatformMoveComponent::UPlatformMoveComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
-	SetMobility(EComponentMobility::Movable);
+	USceneComponent::SetMobility(EComponentMobility::Movable);
 }
 
 void UPlatformMoveComponent::BeginPlay()

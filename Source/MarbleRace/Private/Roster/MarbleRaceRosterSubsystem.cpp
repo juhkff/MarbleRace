@@ -102,7 +102,7 @@ bool UMarbleRaceRosterSubsystem::RemoveEntry(int32 Index)
 	}
 
 	Entries.RemoveAt(Index);
-	if (UTexture2D* Cached = PortraitCache.FindRef(Index))
+	if (PortraitCache.FindRef(Index))
 	{
 		PortraitCache.Remove(Index);
 	}
@@ -111,7 +111,7 @@ bool UMarbleRaceRosterSubsystem::RemoveEntry(int32 Index)
 	TMap<int32, TObjectPtr<UTexture2D>> Rebuilt;
 	for (int32 OldIndex = Index + 1; OldIndex <= Entries.Num(); ++OldIndex)
 	{
-		if (TObjectPtr<UTexture2D>* Found = PortraitCache.Find(OldIndex))
+		if (const TObjectPtr<UTexture2D>* Found = PortraitCache.Find(OldIndex))
 		{
 			Rebuilt.Add(OldIndex - 1, *Found);
 		}
@@ -122,7 +122,7 @@ bool UMarbleRaceRosterSubsystem::RemoveEntry(int32 Index)
 	return true;
 }
 
-bool UMarbleRaceRosterSubsystem::MoveEntry(int32 Index, int32 Delta)
+bool UMarbleRaceRosterSubsystem::MoveEntry(const int32 Index, const int32 Delta)
 {
 	const int32 Target = Index + Delta;
 	if (!Entries.IsValidIndex(Index) || !Entries.IsValidIndex(Target))
@@ -150,7 +150,7 @@ bool UMarbleRaceRosterSubsystem::MoveEntry(int32 Index, int32 Delta)
 	return true;
 }
 
-bool UMarbleRaceRosterSubsystem::SetDisplayName(int32 Index, const FString& NewName)
+bool UMarbleRaceRosterSubsystem::SetDisplayName(const int32 Index, const FString& NewName)
 {
 	if (!Entries.IsValidIndex(Index))
 	{

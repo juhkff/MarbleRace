@@ -5,6 +5,9 @@ Intermediate/
 Saved/
 .vs/
 
+# 编辑器打开材质预览时自动写入的光照配置，每台机器都会改。
+Config/DefaultEditor.ini
+
 # 建模模式布尔、圆柱等临时网格。正式网格另存在 Content/Meshes。
 Content/**/_GENERATED/
 

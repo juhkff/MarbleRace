@@ -30,6 +30,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category="开局", meta=(DisplayName="弹珠类"))
 	TSubclassOf<AActor> MarbleClass;
 
+	/** 圆盘原始直径为 400 cm；缩小后才能在滚筒内并排生成参赛弹珠。 */
+	UPROPERTY(EditDefaultsOnly, Category="开局", meta=(DisplayName="生成弹珠缩放", ClampMin="0.05"))
+	float MarbleSpawnScale = 0.45f;
+
 	UPROPERTY(EditDefaultsOnly, Category="开局", meta=(DisplayName="滚筒类"))
 	TSubclassOf<AActor> DrumClass;
 

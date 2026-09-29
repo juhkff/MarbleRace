@@ -59,10 +59,15 @@ public:
 
 private:
 	bool IsRespawnClear(const FPendingMarbleRelocation& Entry, const FVector& Position) const;
+
+	/** 出口被占/被挡时，每秒最多打印一次原因，便于排查队列卡住。 */
+	void LogRespawnBlocked(const FPendingMarbleRelocation& Entry, const FVector& Position) const;
+
 	void RestoreMarble(const FPendingMarbleRelocation& Entry, const FVector* Position);
 
 	UPROPERTY()
 	TSubclassOf<AActor> MarbleClass;
 
 	double LastReleaseTime = -1000.0;
+	double LastBlockedLogTime = -1000.0;
 };

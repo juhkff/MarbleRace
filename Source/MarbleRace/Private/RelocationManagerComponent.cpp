@@ -115,6 +115,57 @@ bool URelocationManagerComponent::IsRespawnClear(const FPendingMarbleRelocation&
 	                                            FCollisionShape::MakeSphere(Entry.Radius + 2.f), Params);
 }
 
+void URelocationManagerComponent::LogRespawnBlocked(const FPendingMarbleRelocation& Entry, const FVector& Position) const
+{
+	const UWorld* World = GetWorld();
+	if (!World || !IsValid(Entry.Marble))
+	{
+		return;
+	}
+
+	if (MarbleClass)
+	{
+		for (TActorIterator<AActor> It(World, MarbleClass); It; ++It)
+		{
+			const AActor* Other = *It;
+			if (Other == Entry.Marble || Other->IsHidden())
+			{
+				continue;
+			}
+			const UPrimitiveComponent* OtherBody = Cast<UPrimitiveComponent>(Other->GetRootComponent());
+			if (!OtherBody)
+			{
+				continue;
+			}
+			const float Needed = Entry.Radius + GetMarbleRadius(OtherBody) + FMath::Max(0.f, MarbleClearance);
+			const float Distance = FVector::Dist(Position, OtherBody->GetComponentLocation());
+			if (Distance < Needed)
+			{
+				UE_LOG(LogTemp, Warning,
+				       TEXT("重定位管理器 %s：出口 %s 被弹珠 %s 占住（距离 %.1f，需要 %.1f），队列等待中"),
+				       *GetOwner()->GetName(), *Position.ToString(), *Other->GetName(), Distance, Needed);
+				return;
+			}
+		}
+	}
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(RelocationPlacement));
+	Params.AddIgnoredActor(Entry.Marble);
+	FHitResult Hit;
+	if (World->SweepSingleByChannel(Hit, Position, Position, FQuat::Identity, ECC_PhysicsBody,
+	                                FCollisionShape::MakeSphere(Entry.Radius + 2.f), Params))
+	{
+		UE_LOG(LogTemp, Warning,
+		       TEXT("重定位管理器 %s：出口 %s 被 %s 挡住（检查半径 %.1f），队列等待中"),
+		       *GetOwner()->GetName(), *Position.ToString(),
+		       Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("未知物体"), Entry.Radius + 2.f);
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("重定位管理器 %s：出口 %s 判定为不干净但未找到原因（球半径 %.1f）"),
+	       *GetOwner()->GetName(), *Position.ToString(), Entry.Radius);
+}
+
 void URelocationManagerComponent::RestoreMarble(const FPendingMarbleRelocation& Entry, const FVector* Position)
 {
 	if (!IsValid(Entry.Marble) || !IsValid(Entry.Body))
@@ -130,8 +181,11 @@ void URelocationManagerComponent::RestoreMarble(const FPendingMarbleRelocation& 
 	Entry.Body->SetSimulatePhysics(Entry.bWasSimulatingPhysics);
 	if (Position)
 	{
-		// 成功重生：停止该球的世界重力，线速度和角速度都从零开始。
-		Entry.Body->SetEnableGravity(false);
+		// 成功重生：线速度和角速度都从零开始。
+		// 重生点落在重力场里时，可以把管理器上的开关关掉，交给重力场施力。
+		const ARelocationManagerActor* Manager = Cast<ARelocationManagerActor>(GetOwner());
+		const bool bEnableGravity = Manager ? Manager->bEnableGravityAfterRespawn : true;
+		Entry.Body->SetEnableGravity(bEnableGravity);
 		if (Entry.bWasSimulatingPhysics)
 		{
 			Entry.Body->SetPhysicsLinearVelocity(FVector::ZeroVector);
@@ -169,9 +223,21 @@ void URelocationManagerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	{
 		return;
 	}
-	const FVector Position = Manager->RespawnLocation;
+	// 本次尝试的落点：开启随机范围时每帧重抽，抽到被挡住的位置下一帧就换一个。
+	const FVector Position = Manager->RollRespawnLocation();
 	const FPendingMarbleRelocation& First = PendingMarbles[0];
-	if (!IsRespawnClear(First, Position) ||
+	const bool bClear = IsRespawnClear(First, Position);
+	if (!bClear)
+	{
+		// 队列卡住时给出原因：被别的球占住，还是被静态物体挡住。
+		const double Now = GetWorld()->GetTimeSeconds();
+		if (Now - LastBlockedLogTime > 1.0)
+		{
+			LastBlockedLogTime = Now;
+			LogRespawnBlocked(First, Position);
+		}
+	}
+	if (!bClear ||
 	    GetWorld()->GetTimeSeconds() - LastReleaseTime < FMath::Max(0.f, MinimumReleaseInterval))
 	{
 		return;

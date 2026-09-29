@@ -1136,12 +1136,12 @@ void AMarbleRaceMenuHUD::DrawMainMenuPage(float ScreenWidth, float ScreenHeight)
 	               ButtonFontSize, false))
 	{
 		CommitFocusedText();
-		// 这张关卡自己没指定模式时，全局默认仍是主菜单，画面会继续被菜单盖住。
+		// 由比赛关卡的 World Settings 决定游戏模式，便于在蓝图中调整弹珠生成大小。
 		UGameplayStatics::OpenLevel(
 			this,
 			RaceLevelName,
 			true,
-			TEXT("game=/Script/MarbleRace.MarbleRaceLevelGameMode"));
+			TEXT(""));
 		return;
 	}
 	ButtonY += ButtonHeight + MarbleRaceMenuLayout::Gap;

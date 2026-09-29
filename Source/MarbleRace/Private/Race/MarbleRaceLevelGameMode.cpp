@@ -214,7 +214,10 @@ void AMarbleRaceLevelGameMode::SpawnMarblesInDrum()
 		FVector Location = DrumOrigin + MarbleOffsetInDrum(Slot, EnabledIndices.Num(), HoleRadius);
 		// 包围盒中心落在滚筒厚度中间（Y=25）。侧视平面是 Y=0。
 		Location.Y = 0.f;
-		AActor* Marble = World->SpawnActor<AActor>(MarbleClass, Location, FRotator::ZeroRotator, SpawnParams);
+		// 原始圆盘面朝 Z，侧视赛道位于 X/Z 平面；绕 X 轴旋转 90° 让图案朝向镜头。
+		const FTransform SpawnTransform(FRotator(0.f, 0.f, 90.f), Location,
+		                                FVector(FMath::Max(0.05f, MarbleSpawnScale)));
+		AActor* Marble = World->SpawnActor<AActor>(MarbleClass, SpawnTransform, SpawnParams);
 		if (!Marble)
 		{
 			continue;

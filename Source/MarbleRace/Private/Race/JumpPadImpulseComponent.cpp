@@ -64,6 +64,12 @@ void UJumpPadImpulseComponent::HandlePadHit(UPrimitiveComponent* HitComponent, A
 	}
 	LastLaunchTimes.Add(Key, Now);
 
-	// bVelChange=true：力度表示速度增量，和弹珠的质量无关。
-	OtherComp->AddImpulse(Direction * LaunchStrength, NAME_None, true);
+	// 只绕世界 Y 轴偏转：侧视关卡的随机方向留在 X-Z 平面，不随机推向镜头。
+	const float Angle = FMath::FRandRange(-FMath::Abs(RandomAngleDegrees), FMath::Abs(RandomAngleDegrees));
+	const FVector RandomDirection = Direction.RotateAngleAxis(Angle, FVector::YAxisVector);
+	const float RandomOffset = FMath::FRandRange(-FMath::Abs(RandomStrengthRange), FMath::Abs(RandomStrengthRange));
+	const float Speed = FMath::Max(0.f, LaunchStrength + RandomOffset);
+
+	// 每次命中重新抽样，直接覆盖原有线速度，而不是和原速度叠加。
+	OtherComp->SetPhysicsLinearVelocity(RandomDirection * Speed, false);
 }

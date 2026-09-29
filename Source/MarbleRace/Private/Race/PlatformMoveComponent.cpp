@@ -254,8 +254,8 @@ void UPlatformMoveComponent::DetectSideWallPinch(UPrimitiveComponent& Platform, 
 		Escape.bHadGravity = Body->IsGravityEnabled();
 
 		// 固定速度与固定时间；期间不受碰撞、重力或附近弹珠影响。
-		Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Body->SetSimulatePhysics(false);
+		Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		ActiveEscapes.Add(Escape);
 	}
 }

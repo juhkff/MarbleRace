@@ -4,6 +4,8 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "PhysicsEngine/BodyInstance.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "Engine/OverlapResult.h"
 #include "Race/RelocationManagerActor.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -11,14 +13,24 @@ namespace
 {
 	float GetMarbleRadius(const UPrimitiveComponent* Body)
 	{
-		const float VisualRadius = FMath::Max(Body->Bounds.BoxExtent.X, Body->Bounds.BoxExtent.Z);
-		const FBodyInstance* Instance = Body->GetBodyInstance();
-		if (!Instance || !Instance->IsValidBodyInstance())
+		// 在未旋转的局部轴上计算当前缩放的尺寸，避免旋转后的世界 AABB 膨胀。
+		const FTransform ScaleTransform(FQuat::Identity, FVector::ZeroVector, Body->GetComponentScale());
+		const float VisualRadius = Body->CalcBounds(ScaleTransform).BoxExtent.GetMax();
+		const UBodySetup* Setup = Body->GetPhysicsBodySetup();
+		if (!Setup || Setup->AggGeom.GetElementCount() == 0)
 		{
 			return VisualRadius;
 		}
-		const FVector Extent = Instance->GetBodyBounds().GetExtent();
-		return FMath::Max(VisualRadius, FMath::Max(Extent.X, Extent.Z));
+		return FMath::Max(VisualRadius, Setup->AggGeom.CalcAABB(ScaleTransform).GetExtent().GetMax());
+	}
+
+	bool FindPlacementOverlaps(const UWorld* World, const FPendingMarbleRelocation& Entry,
+		const FVector& Position, TArray<FOverlapResult>& Overlaps)
+	{
+		FComponentQueryParams Params(SCENE_QUERY_STAT(RelocationPlacement));
+		Params.AddIgnoredActor(Entry.Marble);
+		return Entry.Body->ComponentOverlapMulti(Overlaps, World, Position,
+			Entry.Body->GetComponentQuat(), Entry.Body->GetCollisionObjectType(), Params);
 	}
 }
 
@@ -44,7 +56,7 @@ void URelocationManagerComponent::BeginPlay()
 	}
 }
 
-void URelocationManagerComponent::EnqueueMarble(AActor* Marble, UPrimitiveComponent* Body)
+void URelocationManagerComponent::EnqueueMarble(AActor* Marble, UPrimitiveComponent* Body, int32 SourceNumber)
 {
 	if (!GetWorld() || !MarbleClass || !Marble || !Marble->IsA(MarbleClass) ||
 	    !Body || !Body->IsSimulatingPhysics() ||
@@ -56,6 +68,10 @@ void URelocationManagerComponent::EnqueueMarble(AActor* Marble, UPrimitiveCompon
 		return;
 	}
 
+	if (auto* Manager = Cast<ARelocationManagerActor>(GetOwner()))
+	{
+		Manager->SetMarbleRespawnSource(Marble, SourceNumber);
+	}
 	FPendingMarbleRelocation Entry;
 	Entry.Marble = Marble;
 	Entry.Body = Body;
@@ -66,8 +82,11 @@ void URelocationManagerComponent::EnqueueMarble(AActor* Marble, UPrimitiveCompon
 	Entry.bWasSimulatingPhysics = true;
 	Entry.bHadGravity = Body->IsGravityEnabled();
 	Entry.bWasHidden = Marble->IsHidden();
+	Entry.bAlwaysCreatedPhysicsState = Body->bAlwaysCreatePhysicsState;
 
 	// 暂停原对象而不是销毁它，保留赛程中的弹珠身份和材质。
+	// 暂停期间仍保留真实碰撞几何用于落点查询，但自身不参与场景碰撞。
+	Body->bAlwaysCreatePhysicsState = true;
 	Body->SetSimulatePhysics(false);
 	Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Marble->SetActorHiddenInGame(true);
@@ -109,10 +128,12 @@ bool URelocationManagerComponent::IsRespawnClear(const FPendingMarbleRelocation&
 	}
 
 	// 另外检查静态墙、移动平台等非弹珠实体；忽略正在等待且已无碰撞的自身。
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(RelocationPlacement));
-	Params.AddIgnoredActor(Entry.Marble);
-	return !World->OverlapBlockingTestByChannel(Position, FQuat::Identity, ECC_PhysicsBody,
-	                                            FCollisionShape::MakeSphere(Entry.Radius + 2.f), Params);
+	if (!IsValid(Entry.Body) || !Entry.Body->GetBodyInstance()->IsValidBodyInstance())
+	{
+		return false;
+	}
+	TArray<FOverlapResult> Overlaps;
+	return !FindPlacementOverlaps(World, Entry, Position, Overlaps);
 }
 
 void URelocationManagerComponent::LogRespawnBlocked(const FPendingMarbleRelocation& Entry, const FVector& Position) const
@@ -149,17 +170,20 @@ void URelocationManagerComponent::LogRespawnBlocked(const FPendingMarbleRelocati
 		}
 	}
 
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(RelocationPlacement));
-	Params.AddIgnoredActor(Entry.Marble);
-	FHitResult Hit;
-	if (World->SweepSingleByChannel(Hit, Position, Position, FQuat::Identity, ECC_PhysicsBody,
-	                                FCollisionShape::MakeSphere(Entry.Radius + 2.f), Params))
+	TArray<FOverlapResult> Overlaps;
+	if (IsValid(Entry.Body) && FindPlacementOverlaps(World, Entry, Position, Overlaps))
 	{
-		UE_LOG(LogTemp, Warning,
-		       TEXT("重定位管理器 %s：出口 %s 被 %s 挡住（检查半径 %.1f），队列等待中"),
-		       *GetOwner()->GetName(), *Position.ToString(),
-		       Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("未知物体"), Entry.Radius + 2.f);
-		return;
+		for (const FOverlapResult& Hit : Overlaps)
+		{
+			if (Hit.bBlockingHit)
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("重定位管理器 %s：出口 %s 被 %s 的组件 %s 挡住（真实碰撞形状，缩放 %s），队列等待中"),
+					*GetOwner()->GetName(), *Position.ToString(), *GetNameSafe(Hit.GetActor()),
+					*GetNameSafe(Hit.GetComponent()), *Entry.Body->GetComponentScale().ToString());
+				return;
+			}
+		}
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("重定位管理器 %s：出口 %s 判定为不干净但未找到原因（球半径 %.1f）"),
@@ -178,6 +202,7 @@ void URelocationManagerComponent::RestoreMarble(const FPendingMarbleRelocation& 
 		Entry.Body->SetWorldLocation(*Position, false, nullptr, ETeleportType::TeleportPhysics);
 	}
 	Entry.Body->SetCollisionEnabled(Entry.PreviousCollision);
+	Entry.Body->bAlwaysCreatePhysicsState = Entry.bAlwaysCreatedPhysicsState;
 	Entry.Body->SetSimulatePhysics(Entry.bWasSimulatingPhysics);
 	if (Position)
 	{
@@ -190,6 +215,15 @@ void URelocationManagerComponent::RestoreMarble(const FPendingMarbleRelocation& 
 		{
 			Entry.Body->SetPhysicsLinearVelocity(FVector::ZeroVector);
 			Entry.Body->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector);
+			if (Manager && Manager->bEnableRespawnImpulse)
+			{
+				// Sample once, only after successful respawn and physics/velocity restoration.
+				const FVector Impulse = Manager->RollRespawnImpulse();
+				if (!Impulse.IsNearlyZero())
+				{
+					Entry.Body->AddImpulse(Impulse, NAME_None, false);
+				}
+			}
 		}
 	}
 	else
@@ -218,14 +252,22 @@ void URelocationManagerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		return;
 	}
 
-	const ARelocationManagerActor* Manager = Cast<ARelocationManagerActor>(GetOwner());
+	ARelocationManagerActor* Manager = Cast<ARelocationManagerActor>(GetOwner());
 	if (!Manager)
 	{
 		return;
 	}
-	// 本次尝试的落点：开启随机范围时每帧重抽，抽到被挡住的位置下一帧就换一个。
-	const FVector Position = Manager->RollRespawnLocation();
-	const FPendingMarbleRelocation& First = PendingMarbles[0];
+	if (GetWorld()->GetTimeSeconds() - LastReleaseTime < FMath::Max(0.f, MinimumReleaseInterval)) return;
+	// 按入队顺序检查各球自己的出口，阻塞的出口不妨碍其他出口。
+	for (int32 ReleaseIndex = 0; ReleaseIndex < PendingMarbles.Num(); ++ReleaseIndex)
+	{
+	const FPendingMarbleRelocation& First = PendingMarbles[ReleaseIndex];
+	if (!IsValid(First.Marble) || !IsValid(First.Body)) continue;
+	FVector Position;
+	if (!Manager->TryRollRespawnLocation(First.Marble, Position))
+	{
+		continue;
+	}
 	const bool bClear = IsRespawnClear(First, Position);
 	if (!bClear)
 	{
@@ -237,20 +279,20 @@ void URelocationManagerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 			LogRespawnBlocked(First, Position);
 		}
 	}
-	if (!bClear ||
-	    GetWorld()->GetTimeSeconds() - LastReleaseTime < FMath::Max(0.f, MinimumReleaseInterval))
-	{
-		return;
-	}
+	if (!bClear) continue;
 
-	// 仅管理器放出队首球；传送/陷阱区域不再独立改动位置。
+	// 放出最早能够重生的球，仅在成功后推进该球的轮询索引。
 	const FPendingMarbleRelocation Releasing = First;
-	PendingMarbles.RemoveAt(0);
+	PendingMarbles.RemoveAt(ReleaseIndex);
 	RestoreMarble(Releasing, &Position);
+	Manager->CommitMarbleRespawn(Releasing.Marble);
 	LastReleaseTime = GetWorld()->GetTimeSeconds();
 	UE_LOG(LogTemp, Log, TEXT("重定位管理器 %s：弹珠 %s 放出于 %s，剩余 %d 颗"),
 	       *GetOwner()->GetName(), IsValid(Releasing.Marble) ? *Releasing.Marble->GetName() : TEXT("无效"),
 	       *Position.ToString(), PendingMarbles.Num());
+	// 继续检查其他出口；刚放出的球会占据当前出口，阻止同出口重复放出。
+	--ReleaseIndex;
+	}
 }
 
 void URelocationManagerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)

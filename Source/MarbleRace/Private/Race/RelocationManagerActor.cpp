@@ -1,5 +1,6 @@
 #include "Race/RelocationManagerActor.h"
 
+#include "Components/ChildActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "RelocationManagerComponent.h"
 
@@ -11,10 +12,35 @@ ARelocationManagerActor::ARelocationManagerActor()
 
 FVector ARelocationManagerActor::RollRespawnLocation() const
 {
-	FVector Location = RespawnLocation;
+	return RollRespawnLocationAt(RespawnLocation);
+}
+
+bool ARelocationManagerActor::TryRollRespawnLocation(AActor* Marble, FVector& OutPosition) const
+{
+	OutPosition = RollRespawnLocation();
+	return true;
+}
+
+void ARelocationManagerActor::CommitMarbleRespawn(AActor* Marble)
+{
+}
+
+FVector ARelocationManagerActor::RollRespawnLocationAt(const FVector& BaseLocation) const
+{
+	// Match the frame in which the owning level Blueprint's component positions are edited.
+	// A ChildActorComponent's own transform is the Manager placement, not the level origin.
+	const auto ToWorldLocation = [this](const FVector& BlueprintLocation) -> FVector
+	{
+		const USceneComponent* ReferenceComponent = GetRespawnCoordinateFrame();
+		return IsValid(ReferenceComponent)
+			? ReferenceComponent->GetComponentTransform().TransformPosition(BlueprintLocation)
+			: BlueprintLocation;
+	};
+
+	FVector Location = BaseLocation;
 	if (!bEnableRandomRespawn)
 	{
-		return Location;
+		return ToWorldLocation(Location);
 	}
 
 	// 小于这个值（厘米）的偏移在画面上和 0 没有区别，一律当成 0 重抽。
@@ -47,7 +73,53 @@ FVector ARelocationManagerActor::RollRespawnLocation() const
 	Location.X = OffsetAxis(Location.X, RespawnRandomRange.X);
 	Location.Y = OffsetAxis(Location.Y, RespawnRandomRange.Y);
 	Location.Z = OffsetAxis(Location.Z, RespawnRandomRange.Z);
-	return Location;
+	// Random ranges use the same Blueprint axes as the configured respawn position.
+	return ToWorldLocation(Location);
+}
+
+const USceneComponent* ARelocationManagerActor::GetRespawnCoordinateFrame() const
+{
+	const UChildActorComponent* OwningChildComponent = GetParentComponent();
+	return OwningChildComponent
+		? OwningChildComponent->GetAttachParent()
+		: (GetRootComponent() ? GetRootComponent()->GetAttachParent() : nullptr);
+}
+
+FVector ARelocationManagerActor::RollRespawnImpulse() const
+{
+	if (!bEnableRespawnImpulse)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const auto Sample = [](const double A, const double B) -> double
+	{
+		if (!FMath::IsFinite(A) || !FMath::IsFinite(B))
+		{
+			return 0.0;
+		}
+		return FMath::FRandRange(FMath::Min(A, B), FMath::Max(A, B));
+	};
+
+	const FVector& Minimum = RespawnImpulseDirectionRange.Minimum;
+	const FVector& Maximum = RespawnImpulseDirectionRange.Maximum;
+	FVector Direction(Sample(Minimum.X, Maximum.X), Sample(Minimum.Y, Maximum.Y),
+	                  Sample(Minimum.Z, Maximum.Z));
+	Direction = Direction.GetSafeNormal();
+	if (Direction.IsNearlyZero())
+	{
+		return FVector::ZeroVector;
+	}
+
+	if (const USceneComponent* ReferenceComponent = GetRespawnCoordinateFrame(); IsValid(ReferenceComponent))
+	{
+		// Rotation only: level translation/scale must not change the sampled impulse magnitude.
+		Direction = ReferenceComponent->GetComponentTransform().TransformVectorNoScale(Direction).GetSafeNormal();
+	}
+
+	const double A = FMath::Max(0.f, RespawnImpulseMagnitudeRange.Minimum);
+	const double B = FMath::Max(0.f, RespawnImpulseMagnitudeRange.Maximum);
+	return Direction * Sample(A, B);
 }
 
 URelocationManagerComponent* ARelocationManagerActor::GetRelocationComponent() const

@@ -1,4 +1,5 @@
 #include "Race/MarbleRaceLevelGameMode.h"
+#include "MarbleCameraFollow.h"
 
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -107,10 +108,8 @@ void AMarbleRaceLevelGameMode::Tick(const float DeltaSeconds)
 	AActor* Leader = FindLeadingMarble();
 	if (!Leader)
 	{
-		Leader = CurrentLeader.Get();
-	}
-	if (!Leader)
-	{
+		// All remaining marbles are queued or finished: hold the camera in place.
+		CurrentLeader.Reset();
 		return;
 	}
 
@@ -181,6 +180,8 @@ void AMarbleRaceLevelGameMode::SpawnMarblesInDrum()
 	FVector DrumExtent = FVector::ZeroVector;
 	Drum->GetActorBounds(false, DrumOrigin, DrumExtent);
 	const float HoleRadius = FMath::Min(DrumExtent.X, DrumExtent.Z) * 0.65f;
+	// 赛道以滚筒所在的 X/Y 为中心线，用来判断弹珠有没有横向掉出赛道。
+	CourseCentre = FVector2D(DrumOrigin.X, DrumOrigin.Y);
 
 	const UGameInstance* GameInstance = GetGameInstance();
 	const UMarbleRaceRosterSubsystem* Roster = GameInstance
@@ -317,7 +318,7 @@ void AMarbleRaceLevelGameMode::MarkFinishedMarbles()
 
 	for (AActor* Marble : Marbles)
 	{
-		if (!IsValid(Marble) || HasFinished(Marble))
+		if (!IsEligibleMarble(Marble))
 		{
 			continue;
 		}
@@ -334,13 +335,46 @@ bool AMarbleRaceLevelGameMode::HasFinished(const AActor* Marble) const
 	return FinishedMarbles.Contains(Marble);
 }
 
+bool AMarbleRaceLevelGameMode::IsEligibleMarble(const AActor* Marble) const
+{
+	const bool bValid = IsValid(Marble);
+	return MarbleRace::IsCameraTargetEligible(bValid, bValid && Marble->IsHidden(),
+	                                        bValid && HasFinished(Marble));
+}
+
+bool AMarbleRaceLevelGameMode::IsOnCourse(const AActor* Marble) const
+{
+	if (!IsValid(Marble))
+	{
+		return false;
+	}
+
+	// 横向离开赛道中心线的弹珠（例如被滚筒甩出去、正在往深渊掉的）不能当第一名，
+	// 否则镜头会跟着它一路往下掉。
+	const FVector Location = Marble->GetActorLocation();
+	const float LateralOffset = FVector2D(Location.X - CourseCentre.X, Location.Y - CourseCentre.Y).Size();
+	if (MaxLeaderLateralOffset > 0.f && LateralOffset > MaxLeaderLateralOffset)
+	{
+		return false;
+	}
+
+	// 赛道上的弹珠不会长时间自由落体，向下速度过大说明它已经离开赛道。
+	const float FallSpeed = -Marble->GetVelocity().Z;
+	return !(MaxLeaderFallSpeed > 0.f && FallSpeed > MaxLeaderFallSpeed);
+}
+
+bool AMarbleRaceLevelGameMode::IsLeaderCandidate(const AActor* Marble) const
+{
+	return IsEligibleMarble(Marble) && IsOnCourse(Marble);
+}
+
 AActor* AMarbleRaceLevelGameMode::FindLeadingMarble() const
 {
 	AActor* Best = nullptr;
 	float BestZ = 0.f;
 	for (AActor* Marble : Marbles)
 	{
-		if (!IsValid(Marble) || HasFinished(Marble))
+		if (!IsLeaderCandidate(Marble))
 		{
 			continue;
 		}
@@ -354,7 +388,7 @@ AActor* AMarbleRaceLevelGameMode::FindLeadingMarble() const
 	}
 
 	AActor* StickyLeader = CurrentLeader.Get();
-	if (Best && IsValid(StickyLeader) && !HasFinished(StickyLeader))
+	if (Best && IsLeaderCandidate(StickyLeader))
 	{
 		const float StickyZ = StickyLeader->GetActorLocation().Z;
 		if (StickyZ <= BestZ + LeadStickiness)
@@ -375,13 +409,11 @@ void AMarbleRaceLevelGameMode::FollowLeader(const AActor* Leader, const float De
 
 	const float TargetZ = Leader->GetActorLocation().Z;
 	const float CurrentZ = FollowCamera->GetActorLocation().Z;
-	float SmoothedZ = FMath::FInterpTo(CurrentZ, TargetZ, DeltaSeconds, CameraFollowSpeed);
-
-	const float MaxLag = FMath::Max(200.f, CameraOrthoWidth * 0.22f);
-	if (const float LagZ = SmoothedZ - TargetZ; FMath::Abs(LagZ) > MaxLag)
-	{
-		SmoothedZ = TargetZ + FMath::Sign(LagZ) * MaxLag;
-	}
+	// Preserve ordinary interpolation, but never snap to a teleported/new leader.
+	const float MaxSpeed = FMath::Max(200.f, CameraOrthoWidth) *
+	                       FMath::Max(0.1f, CameraMaxViewportWidthsPerSecond);
+	const float SmoothedZ = MarbleRace::AdvanceCameraZ(CurrentZ, TargetZ, DeltaSeconds,
+	                                                CameraFollowSpeed, MaxSpeed);
 
 	FollowCamera->SetActorLocation(FVector(CameraLockX, CameraSideY, SmoothedZ));
 }

@@ -21,4 +21,8 @@ public:
 	/** 接到网格的「碰撞开始重叠」事件上。大小读检测线蓝图上的「目标缩放」。 */
 	UFUNCTION(BlueprintCallable, Category="检测", meta=(DisplayName="改弹珠大小"))
 	void ResizeMarble(AActor* OtherActor, const float Scale) const;
+
+	/** 仅改变穿过检测线的弹珠恢复力；运行时材质独立于其他球，系数限制在 0～1。 */
+	UFUNCTION(BlueprintCallable, BlueprintPure=false, Category="检测", meta=(DisplayName="改弹珠恢复力"))
+	bool SetMarbleRestitution(AActor* OtherActor, float Restitution) const;
 };

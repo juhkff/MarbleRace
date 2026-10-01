@@ -48,7 +48,22 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category="镜头", meta=(DisplayName="跟随速度", ClampMin="0.1"))
 	float CameraFollowSpeed = 6.f;
 
+	/** Maximum camera travel per second, in orthographic viewport widths. */
+	UPROPERTY(EditDefaultsOnly, Category="镜头", meta=(DisplayName="最大镜头移动速度（视野宽度/秒）", ClampMin="0.1"))
+	float CameraMaxViewportWidthsPerSecond = 2.f;
+
+	/** 弹珠横向偏离赛道中心线超过这个距离（cm）就认为已经掉出赛道，不再算作“第一名”。0 表示不判定。 */
+	UPROPERTY(EditAnywhere, Category="镜头", meta=(DisplayName="掉出赛道判定距离", ClampMin="0.0", ForceUnits="cm"))
+	float MaxLeaderLateralOffset = 4000.f;
+
+	/** 弹珠向下速度超过这个值（cm/s）就认为在赛道外自由落体，不再算作“第一名”。0 表示不判定。 */
+	UPROPERTY(EditAnywhere, Category="镜头", meta=(DisplayName="掉出赛道判定下落速度", ClampMin="0.0", ForceUnits="cm/s"))
+	float MaxLeaderFallSpeed = 9000.f;
+
 private:
+	friend class FMarbleCameraEligibilityTest;
+	friend class FMarbleCameraOffCourseTest;
+
 	void CacheRaceAnchors();
 	void SpawnMarblesInDrum();
 	void ShowCountdown(int32 SecondsRemaining);
@@ -57,6 +72,9 @@ private:
 	void RemoveDrums();
 	void MarkFinishedMarbles();
 	bool HasFinished(const AActor* Marble) const;
+	bool IsEligibleMarble(const AActor* Marble) const;
+	bool IsOnCourse(const AActor* Marble) const;
+	bool IsLeaderCandidate(const AActor* Marble) const;
 	AActor* FindLeadingMarble() const;
 	void FollowLeader(const AActor* Leader, float DeltaSeconds) const;
 
@@ -79,6 +97,8 @@ private:
 	float CameraLockX = 0.f;
 	float CameraSideY = 0.f;
 	float CameraOrthoWidth = 2500.f;
+	/** 赛道中心线（滚筒所在的 X/Y），用来判断弹珠有没有横向掉出赛道。 */
+	FVector2D CourseCentre = FVector2D::ZeroVector;
 	float FinishLineZ = 0.f;
 	bool bHasFinishLine = false;
 	bool bFollowLeader = false;

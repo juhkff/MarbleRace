@@ -6,10 +6,35 @@
 #include "EngineUtils.h"
 #include "Race/RelocationManagerActor.h"
 #include "RelocationManagerComponent.h"
+#include "MarbleRestitution.h"
+#include "UObject/ConstructorHelpers.h"
 
 ARelocationSourceZone::ARelocationSourceZone()
 {
 	PrimaryActorTick.bCanEverTick = false;
+	static ConstructorHelpers::FClassFinder<AActor> MarbleFinder(TEXT("/Game/角色/弹珠"));
+	if (MarbleFinder.Succeeded())
+	{
+		MarbleClass = MarbleFinder.Class;
+	}
+}
+
+bool ARelocationSourceZone::ApplyCrossingRestitution(AActor* Marble, UPrimitiveComponent* Body)
+{
+	if (!bEnableRestitutionChange || !FMath::IsFinite(RestitutionAfterCrossing) ||
+		!IsValid(Marble) || !MarbleClass || !Marble->IsA(MarbleClass) ||
+		!IsValid(Body) || Body->GetOwner() != Marble || !Body->IsSimulatingPhysics())
+	{
+		return false;
+	}
+
+	if (!MarbleRace::SetBodyRestitution(Body, RestitutionAfterCrossing))
+	{
+		return false;
+	}
+	UE_LOG(LogTemp, Log, TEXT("过线区域 %s：弹珠 %s 恢复力设置为 %.3f"),
+		*GetName(), *Marble->GetName(), FMath::Clamp(RestitutionAfterCrossing, 0.f, 1.f));
+	return true;
 }
 
 ARelocationManagerActor* ARelocationSourceZone::ResolveRelocationManager() const
@@ -92,6 +117,8 @@ void ARelocationSourceZone::HandleEntrance(UPrimitiveComponent* OverlappedCompon
                                            UPrimitiveComponent* OtherComp, int32 OtherBodyIndex,
                                            bool bFromSweep, const FHitResult& SweepResult)
 {
+	// Apply before enqueueing disables physics; the body's override survives relocation.
+	ApplyCrossingRestitution(OtherActor, OtherComp);
 	if (!IsValid(RelocationManager))
 	{
 		RelocationManager = ResolveRelocationManager();
@@ -102,7 +129,7 @@ void ARelocationSourceZone::HandleEntrance(UPrimitiveComponent* OverlappedCompon
 		{
 			UE_LOG(LogTemp, Log, TEXT("重定位入口 %s：弹珠 %s 进入，交给管理器 %s"),
 			       *GetName(), *GetNameSafe(OtherActor), *RelocationManager->GetName());
-			Component->EnqueueMarble(OtherActor, OtherComp);
+			Component->EnqueueMarble(OtherActor, OtherComp, TrapNumber);
 		}
 	}
 }

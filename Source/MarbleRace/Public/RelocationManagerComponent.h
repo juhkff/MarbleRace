@@ -26,6 +26,7 @@ struct FPendingMarbleRelocation
 	bool bWasSimulatingPhysics = false;
 	bool bHadGravity = true;
 	bool bWasHidden = false;
+	bool bAlwaysCreatedPhysicsState = false;
 };
 
 /** 一个管理器处理所有显式连接到它的传送和陷阱区域。 */
@@ -51,7 +52,7 @@ public:
 
 	/** 进入传送/陷阱区域时先隐藏并暂停球，再按顺序交由管理器放出。 */
 	UFUNCTION(BlueprintCallable, Category="重定位")
-	void EnqueueMarble(AActor* Marble, UPrimitiveComponent* Body);
+	void EnqueueMarble(AActor* Marble, UPrimitiveComponent* Body, int32 SourceNumber = 0);
 
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

@@ -31,3 +31,8 @@ Build/
 # OS-generated files
 .DS_Store
 Thumbs.db
+
+# 本地 MCP 调试请求与 Windows 工具缓存
+/inited.json
+/list.json
+/%SystemDrive%/

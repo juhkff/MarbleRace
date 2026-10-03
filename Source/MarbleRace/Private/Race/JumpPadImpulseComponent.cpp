@@ -55,10 +55,11 @@ void UJumpPadImpulseComponent::HandlePadHit(UPrimitiveComponent* HitComponent, A
 		return;
 	}
 
-	// Chaos 在持续接触时可能一帧发出多次命中，短暂去重避免反复弹射。
+	// 按弹珠记录，不同碰撞体、不同接触点不能绕过同一颗球的冷却。
 	const double Now = GetWorld()->GetTimeSeconds();
-	const TWeakObjectPtr<UPrimitiveComponent> Key(OtherComp);
-	if (const double* LastLaunch = LastLaunchTimes.Find(Key); LastLaunch && Now - *LastLaunch < 0.15)
+	const TWeakObjectPtr<AActor> Key(OtherActor);
+	if (const double* LastLaunch = LastLaunchTimes.Find(Key);
+		LastLaunch && Now - *LastLaunch < FMath::Max(0.f, LaunchCooldownSeconds))
 	{
 		return;
 	}

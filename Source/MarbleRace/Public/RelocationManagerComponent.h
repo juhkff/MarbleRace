@@ -27,6 +27,10 @@ struct FPendingMarbleRelocation
 	bool bHadGravity = true;
 	bool bWasHidden = false;
 	bool bAlwaysCreatedPhysicsState = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="重定位")
+	FVector PlannedRespawnPosition = FVector::ZeroVector;
+	bool bHasPlannedRespawnPosition = false;
 };
 
 /** 一个管理器处理所有显式连接到它的传送和陷阱区域。 */
@@ -53,6 +57,8 @@ public:
 	/** 进入传送/陷阱区域时先隐藏并暂停球，再按顺序交由管理器放出。 */
 	UFUNCTION(BlueprintCallable, Category="重定位")
 	void EnqueueMarble(AActor* Marble, UPrimitiveComponent* Body, int32 SourceNumber = 0);
+	/** 查询已确定的下一次落点；查询本身不重新抽样或推进轮询索引。 */
+	bool GetQueuedMarblePosition(const AActor* Marble, FVector& OutPosition) const;
 
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

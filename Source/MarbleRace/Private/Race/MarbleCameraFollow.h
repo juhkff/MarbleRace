@@ -22,4 +22,14 @@ namespace MarbleRace
 		const float MaxStep = MaxSpeed * DeltaSeconds;
 		return CurrentZ + FMath::Clamp(SmoothedZ - CurrentZ, -MaxStep, MaxStep);
 	}
+
+	// Velocity is linear in the remaining distance: v = Rate * (TargetZ - CurrentZ).
+	// Integrate it exactly to avoid frame-rate dependence and overshooting on long frames.
+	inline float AdvanceDistanceCameraZ(const float CurrentZ, const float TargetZ,
+		const float DeltaSeconds, const float Rate)
+	{
+		if (DeltaSeconds <= 0.f || Rate <= 0.f) return CurrentZ;
+		const float Alpha = 1.f - FMath::Exp(-Rate * DeltaSeconds);
+		return FMath::Lerp(CurrentZ, TargetZ, Alpha);
+	}
 }

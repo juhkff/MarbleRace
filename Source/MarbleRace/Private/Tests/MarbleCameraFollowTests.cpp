@@ -4,7 +4,10 @@
 #include "Race/MarbleCameraFollow.h"
 #include "Race/MarbleRaceLevelGameMode.h"
 #include "Components/SceneComponent.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
 #include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
 #include "Engine/World.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarbleCameraFrameBoundTest,
@@ -93,6 +96,125 @@ bool FMarbleCameraEligibilityTest::RunTest(const FString& Parameters)
 	World->DestroyWorld(false);
 	GEngine->DestroyWorldContext(World);
 	World->RemoveFromRoot();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarbleDistanceCameraLawTest,
+	"MarbleRace.Camera.DistanceLinearSpeedAndFrameRate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMarbleDistanceCameraLawTest::RunTest(const FString& Parameters)
+{
+	constexpr float Rate = 12.f, Delta = 1.f / 60.f;
+	const float Near = MarbleRace::AdvanceDistanceCameraZ(0.f, 100.f, Delta, Rate);
+	const float Far = MarbleRace::AdvanceDistanceCameraZ(0.f, 1000.f, Delta, Rate);
+	TestTrue(TEXT("Ten times the distance produces ten times the movement speed"), FMath::IsNearlyEqual(Far, Near * 10.f, .001f));
+	for (float Target : {-10000.f, 10000.f})
+	{
+		const float Next = MarbleRace::AdvanceDistanceCameraZ(0.f, Target, .25f, Rate);
+		TestTrue(TEXT("Long frames remain continuous and never overshoot"), Next > FMath::Min(0.f, Target) && Next < FMath::Max(0.f, Target));
+	}
+	const float Expected = MarbleRace::AdvanceDistanceCameraZ(0.f, 10000.f, 1.f, Rate);
+	for (int32 FPS : {30, 60, 120})
+	{
+		float Position = 0.f;
+		for (int32 Frame = 0; Frame < FPS; ++Frame)
+			Position = MarbleRace::AdvanceDistanceCameraZ(Position, 10000.f, 1.f / FPS, Rate);
+		TestTrue(TEXT("Equal elapsed time yields equal progress at different frame rates"), FMath::IsNearlyEqual(Position, Expected, .02f));
+	}
+	TestEqual(TEXT("Zero frame time holds the camera"), MarbleRace::AdvanceDistanceCameraZ(100.f, 1000.f, 0.f, Rate), 100.f);
+	TestEqual(TEXT("Zero rate holds the camera"), MarbleRace::AdvanceDistanceCameraZ(100.f, 1000.f, Delta, 0.f), 100.f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarbleFinishCameraCatchUpTest,
+	"MarbleRace.Camera.DistanceCatchUpAfterFinish",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMarbleFinishCameraCatchUpTest::RunTest(const FString& Parameters)
+{
+	UGameInstance* Instance = NewObject<UGameInstance>(GEngine);
+	Instance->InitializeStandalone();
+	UWorld* World = Instance->GetWorld();
+	auto* Mode = World->SpawnActor<AMarbleRaceLevelGameMode>();
+	const auto SpawnMarble = [World](float Z)
+	{
+		AActor* Marble = World->SpawnActor<AActor>();
+		auto* Root = NewObject<USceneComponent>(Marble);
+		Marble->AddInstanceComponent(Root);
+		Marble->SetRootComponent(Root);
+		Root->RegisterComponent();
+		Marble->SetActorLocation(FVector(0.f, 0.f, Z));
+		return Marble;
+	};
+	AActor* A = SpawnMarble(100.f);
+	AActor* B = SpawnMarble(4000.f);
+	AActor* C = SpawnMarble(7000.f);
+	AActor* D = SpawnMarble(9000.f);
+	AActor* E = SpawnMarble(10000.f);
+	Mode->Marbles = {A, B, C, D, E};
+	Mode->CurrentLeader = A;
+	Mode->bHasFinishLine = Mode->bFollowLeader = true;
+	Mode->FinishLineZ = 0.f;
+	Mode->FollowCamera = World->SpawnActor<ACameraActor>();
+	Mode->CameraLockX = 32.f;
+	Mode->CameraSideY = -1200.f;
+	Mode->FollowCamera->SetActorLocation(FVector(32.f, -1200.f, 100.f));
+	auto* Controller = World->SpawnActor<APlayerController>();
+	World->AddController(Controller);
+	if (!Controller->PlayerCameraManager) Controller->PlayerCameraManager = World->SpawnActor<APlayerCameraManager>();
+	APlayerCameraManager* CameraManager = Controller->PlayerCameraManager;
+	CameraManager->bUseClientSideCameraUpdates = false;
+	CameraManager->InitializeFor(Controller);
+	Controller->SetViewTarget(Mode->FollowCamera);
+	CameraManager->UpdateCamera(0.f);
+	CameraManager->bGameCameraCutThisFrame = false;
+	constexpr float Delta = 1.f / 60.f;
+	World->DeltaRealTimeSeconds = Delta;
+	A->SetActorLocation(FVector(0.f, 0.f, -1.f));
+	Mode->Tick(Delta * .1f);
+	const FVector First = Mode->FollowCamera->GetActorLocation();
+	TestTrue(TEXT("Crossing starts continuous movement instead of teleporting"), First.Z > 100.f && First.Z < 4000.f);
+	TestTrue(TEXT("A distant successor exceeds the ordinary fixed speed cap"), First.Z - 100.f > 5000.f * Delta);
+	TestTrue(TEXT("Finish slow motion does not slow down camera catch-up"), FMath::IsNearlyEqual(First.Z, MarbleRace::AdvanceDistanceCameraZ(100.f, 4000.f, Delta, 12.f), .001f));
+	TestEqual(TEXT("Track X/Y framing is retained"), FVector2D(First.X, First.Y), FVector2D(32.f, -1200.f));
+	TestEqual(TEXT("Next unfinished leader becomes the target"), Mode->CurrentLeader.Get(), B);
+	TestEqual(TEXT("The rendered view cache tracks this frame's continuous movement"), CameraManager->GetCameraLocation(), First);
+	TestFalse(TEXT("Movement is not flagged as a camera cut"), !!CameraManager->bGameCameraCutThisFrame);
+	TestTrue(TEXT("Catch-up continues for subsequent frames"), Mode->bFinishCameraCatchUpActive);
+	B->SetActorLocation(FVector(0.f, 0.f, -1.f));
+	C->SetActorLocation(FVector(0.f, 0.f, -2.f));
+	Mode->Tick(Delta);
+	TestEqual(TEXT("Simultaneous crossings skip every finished marble"), Mode->CurrentLeader.Get(), D);
+	TestTrue(TEXT("Retargeting stays continuous"), Mode->FollowCamera->GetActorLocation().Z > First.Z && Mode->FollowCamera->GetActorLocation().Z < 9000.f);
+	for (int32 Frame = 0; Frame < 120 && Mode->bFinishCameraCatchUpActive; ++Frame) Mode->Tick(Delta);
+	TestFalse(TEXT("Near the successor the camera returns to ordinary follow"), Mode->bFinishCameraCatchUpActive);
+	TestTrue(TEXT("Camera catches up close to the successor"), FMath::Abs(Mode->FollowCamera->GetActorLocation().Z - 9000.f) <= 250.f);
+	Mode->FollowCamera->SetActorLocation(FVector(32.f, -1200.f, 9000.f));
+	D->SetActorLocation(FVector(0.f, 0.f, 8800.f));
+	Mode->Tick(Delta);
+	TestTrue(TEXT("Ordinary follow keeps its original smoothing"), Mode->FollowCamera->GetActorLocation().Z > 8800.f && Mode->FollowCamera->GetActorLocation().Z < 9000.f);
+	E->SetActorLocation(FVector(0.f, 0.f, 8000.f));
+	Mode->Tick(Delta);
+	TestEqual(TEXT("Ordinary overtakes still select the new leader"), Mode->CurrentLeader.Get(), E);
+	const double BeforeGap = Mode->FollowCamera->GetActorLocation().Z;
+	TestTrue(TEXT("Ordinary overtakes keep their smooth transition"), BeforeGap > 8000.f);
+	E->SetActorLocation(FVector(0.f, 0.f, -1.f));
+	D->SetActorHiddenInGame(true);
+	Mode->Tick(Delta);
+	TestEqual(TEXT("Without a successor the camera holds"), Mode->FollowCamera->GetActorLocation().Z, BeforeGap);
+	TestTrue(TEXT("Catch-up survives a gap in eligible leaders"), Mode->bFinishCameraCatchUpActive);
+	D->SetActorHiddenInGame(false);
+	Mode->Tick(Delta);
+	const double BeforeLast = Mode->FollowCamera->GetActorLocation().Z;
+	TestTrue(TEXT("An available successor is approached without a jump"), BeforeLast > 8800.f && BeforeLast < BeforeGap);
+	D->SetActorLocation(FVector(0.f, 0.f, -1.f));
+	Mode->Tick(Delta);
+	TestEqual(TEXT("The final finish holds the camera"), Mode->FollowCamera->GetActorLocation().Z, BeforeLast);
+	TestFalse(TEXT("Final finish clears the leader"), Mode->CurrentLeader.IsValid());
+	Instance->Shutdown();
+	GEngine->DestroyWorldContext(World);
+	World->DestroyWorld(false);
 	return true;
 }
 

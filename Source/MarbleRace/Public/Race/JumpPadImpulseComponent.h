@@ -24,6 +24,11 @@ public:
 		meta=(DisplayName="弹射力度", ClampMin="0", UIMin="0", ForceUnits="cm/s"))
 	float LaunchStrength = 1000.f;
 
+	/** 同一颗弹珠两次弹射的最短间隔。使用游戏时间，慢动作时也随场景放慢。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="跳板弹射",
+		meta=(DisplayName="弹射冷却时间", ClampMin="0", ForceUnits="s"))
+	float LaunchCooldownSeconds = 0.15f;
+
 	/** 每次触发在 X-Z 平面内随机向左或向右偏转的最大角度；0 表示方向固定。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="跳板弹射|随机",
 		meta=(DisplayName="方向随机角度", ClampMin="0", ClampMax="180", UIMax="45", ForceUnits="deg"))
@@ -38,13 +43,14 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	friend class FJumpPadCooldownTest;
 	UPROPERTY()
 	TSubclassOf<AActor> MarbleClass;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UPrimitiveComponent> PadCollision;
 
-	TMap<TWeakObjectPtr<UPrimitiveComponent>, double> LastLaunchTimes;
+	TMap<TWeakObjectPtr<AActor>, double> LastLaunchTimes;
 
 	UFUNCTION()
 	void HandlePadHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,

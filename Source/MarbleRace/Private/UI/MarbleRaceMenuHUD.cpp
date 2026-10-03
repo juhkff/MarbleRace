@@ -1,6 +1,7 @@
 #include "UI/MarbleRaceMenuHUD.h"
 
 #include "CanvasItem.h"
+#include "Components/AudioComponent.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
@@ -9,6 +10,8 @@
 #include "Engine/Texture2D.h"
 #include "Framework/Application/IInputProcessor.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Fonts/FontMeasure.h"
+#include "Rendering/SlateRenderer.h"
 #include "GameFramework/PlayerController.h"
 #include "GenericPlatform/ITextInputMethodSystem.h"
 #include "Input/Events.h"
@@ -18,6 +21,11 @@
 #include "Layout/Visibility.h"
 #include "Roster/MarbleRaceRosterSubsystem.h"
 #include "Roster/RaceRosterTypes.h"
+#include "Settings/MarbleRaceSettingsSubsystem.h"
+#include "Race/MarbleRaceRecorderSubsystem.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/FileManager.h"
+#include "String/LexFromString.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SViewport.h"
@@ -27,7 +35,7 @@ namespace MarbleRaceMenuLayout
 {
 	/** 各页共用的边距。 */
 	constexpr float Margin = 24.0f;
-	constexpr float HeaderHeight = 58.0f;
+	constexpr float HeaderHeight = 78.0f;
 	constexpr float BottomBarHeight = 96.0f;
 	constexpr float HintHeight = 44.0f;
 	constexpr float Gap = 16.0f;
@@ -281,7 +289,14 @@ private:
 
 AMarbleRaceMenuHUD::AMarbleRaceMenuHUD()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;
+	PreviewPlayer = CreateDefaultSubobject<UAudioComponent>(TEXT("ThemePreviewPlayer"));
+	SetRootComponent(PreviewPlayer);
+	PreviewPlayer->bAutoActivate = false;
+	PreviewPlayer->bIsUISound = true;
+	PreviewPlayer->bAllowSpatialization = false;
+	PreviewPlayer->SetVolumeMultiplier(0.65f);
 
 	// 颜色行提供的颜色。名单才持有小球的真实颜色；这份列表
 	// 只是设置页可以盖到选中条目上的选项。
@@ -332,6 +347,7 @@ void AMarbleRaceMenuHUD::BeginPlay()
 
 void AMarbleRaceMenuHUD::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	StopThemePreview();
 	if (FSlateApplication::IsInitialized())
 	{
 		FSlateApplication& SlateApplicationRef = FSlateApplication::Get();
@@ -408,8 +424,24 @@ void AMarbleRaceMenuHUD::DrawHUD()
 	bClickConsumedThisFrame = false;
 
 	ApplyMouseInputModeOnce();
+	if (bQuitRequested)
+	{
+		DrawRect(BackgroundColor, 0.f, 0.f, Canvas->SizeX, Canvas->SizeY);
+		DrawRecordingExitPage(Canvas->SizeX, Canvas->SizeY);
+		PendingWheelDelta = 0.f;
+		return;
+	}
 	EnsureKeyCatcherFocus();
 	HandlePendingTextCommit();
+	if (CurrentPage != EMarbleRaceMenuPage::CharacterSetup || DetailTabIndex != 2)
+		StopThemePreview();
+	if (FocusedTextField == EMarbleRaceMenuTextField::None)
+	{
+		if (APlayerController* Controller = GetOwningPlayerController(); Controller && Controller->WasInputKeyJustPressed(EKeys::Escape))
+		{
+			HandleEscapeToMainMenu();
+		}
+	}
 
 	const float ScreenWidth = static_cast<float>(Canvas->SizeX);
 	const float ScreenHeight = static_cast<float>(Canvas->SizeY);
@@ -418,6 +450,10 @@ void AMarbleRaceMenuHUD::DrawHUD()
 	if (CurrentPage == EMarbleRaceMenuPage::CharacterSetup)
 	{
 		DrawCharacterSetupPage(ScreenWidth, ScreenHeight);
+	}
+	else if (CurrentPage == EMarbleRaceMenuPage::GameSettings)
+	{
+		DrawGameSettingsPage(ScreenWidth, ScreenHeight);
 	}
 	else
 	{
@@ -506,6 +542,7 @@ void AMarbleRaceMenuHUD::HandlePendingTextCommit()
 
 void AMarbleRaceMenuHUD::HandleKeyChar(const TCHAR Character)
 {
+	if (bQuitRequested) return;
 	if (FocusedTextField == EMarbleRaceMenuTextField::None)
 	{
 		return;
@@ -523,6 +560,7 @@ void AMarbleRaceMenuHUD::HandleKeyChar(const TCHAR Character)
 
 bool AMarbleRaceMenuHUD::HandleKeyDown(const FKey& Key)
 {
+	if (bQuitRequested) return true;
 	if (FocusedTextField == EMarbleRaceMenuTextField::None)
 	{
 		return false;
@@ -550,6 +588,8 @@ bool AMarbleRaceMenuHUD::HandleKeyDown(const FKey& Key)
 			(FocusedTextField == EMarbleRaceMenuTextField::DisplayName)
 				? EMarbleRaceMenuTextField::PortraitPath
 				: EMarbleRaceMenuTextField::DisplayName;
+		DetailTabIndex = NextField == EMarbleRaceMenuTextField::DisplayName ? 0 : 1;
+		StopThemePreview();
 		FocusTextField(NextField);
 		return true;
 	}
@@ -600,6 +640,8 @@ FString* AMarbleRaceMenuHUD::GetFocusedTextBuffer()
 		return &NameEditBuffer;
 	case EMarbleRaceMenuTextField::PortraitPath:
 		return &PathEditBuffer;
+	case EMarbleRaceMenuTextField::MusicStartTime:
+		return &MusicStartEditBuffer;
 	default:
 		return nullptr;
 	}
@@ -622,6 +664,11 @@ void AMarbleRaceMenuHUD::FocusTextField(EMarbleRaceMenuTextField Field)
 	if (Field == EMarbleRaceMenuTextField::DisplayName)
 	{
 		NameEditBuffer = GetEntryName(SelectedEntryIndex);
+	}
+	else if (Field == EMarbleRaceMenuTextField::MusicStartTime)
+	{
+		if (UMarbleRaceRosterSubsystem* Roster = GetRoster(); Roster && Roster->IsValidIndex(SelectedEntryIndex))
+			MusicStartEditBuffer = FString::Printf(TEXT("%.2f"), Roster->GetEntries()[SelectedEntryIndex].ThemeStartTimeSeconds);
 	}
 
 	ActivateImeContext();
@@ -657,6 +704,15 @@ void AMarbleRaceMenuHUD::CommitFocusedText()
 	else if (CommittedField == EMarbleRaceMenuTextField::PortraitPath)
 	{
 		ImportPortraitFromPath(PathEditBuffer);
+	}
+	else if (CommittedField == EMarbleRaceMenuTextField::MusicStartTime)
+	{
+		float Seconds = 0.f;
+		if (!LexTryParseString(Seconds, *MusicStartEditBuffer.TrimStartAndEnd()) ||
+			!FMath::IsFinite(Seconds) || Seconds < 0.f)
+			SetStatus(TEXT("请输入有效的秒数，例如 45.5"), true);
+		else if (Roster->SetThemeStartTime(SelectedEntryIndex, Seconds))
+			SetStatus(TEXT("首次播放起点已保存"), false);
 	}
 }
 
@@ -831,7 +887,7 @@ void AMarbleRaceMenuHUD::ScrollSelectionIntoView(float ListHeight)
 		return;
 	}
 
-	const float RowHeightPixels = FMath::Max(30.0f, RowHeight);
+	const float RowHeightPixels = FMath::Max(58.0f, RowHeight);
 	const float SelectedTop = SelectedEntryIndex * RowHeightPixels;
 	const float SelectedBottom = SelectedTop + RowHeightPixels;
 
@@ -874,6 +930,7 @@ void AMarbleRaceMenuHUD::EnterCharacterSetupPage()
 void AMarbleRaceMenuHUD::HandleEscapeToMainMenu()
 {
 	CommitFocusedText();
+	StopThemePreview();
 	CurrentPage = EMarbleRaceMenuPage::MainMenu;
 	StatusMessage.Reset();
 	bStatusIsError = false;
@@ -881,12 +938,53 @@ void AMarbleRaceMenuHUD::HandleEscapeToMainMenu()
 
 void AMarbleRaceMenuHUD::RequestQuit()
 {
-	// 打包版退出进程。编辑器里走的是 PIE 自己那条控制台
-	// “quit”命令的路径（本地玩家处理退出，再到视口请求关闭），
-	// 这样会结束试玩并留下编辑器。编辑器的结束试玩接口
-	// 这个模块够不着，因为没有依赖 UnrealEd，而且
-	// 不能为了一个菜单按钮去改模块的构建文件。
+	if (bQuitRequested) return;
+	CommitFocusedText();
+	StopThemePreview();
+	bQuitRequested = true;
+	if (UGameInstance* Instance = GetGameInstance())
+	{
+		if (auto* Recorder = Instance->GetSubsystem<UMarbleRaceRecorderSubsystem>())
+			Recorder->StopRecording();
+	}
+	CompleteQuitIfReady();
+}
+
+bool AMarbleRaceMenuHUD::CanCompleteQuit() const
+{
+	if (!bQuitRequested || bQuitIssued) return false;
+	if (UGameInstance* Instance = GetGameInstance())
+	{
+		if (const auto* Recorder = Instance->GetSubsystem<UMarbleRaceRecorderSubsystem>())
+			return Recorder->GetPendingSaveCount() == 0;
+	}
+	return true;
+}
+
+void AMarbleRaceMenuHUD::CompleteQuitIfReady()
+{
+	if (!CanCompleteQuit()) return;
+	bQuitIssued = true;
+	// Only begin engine shutdown once recording saves are ready. Deinitialize's
+	// protective wait then has no encoding work to block the game thread on.
 	UKismetSystemLibrary::QuitGame(this, GetOwningPlayerController(), EQuitPreference::Quit, false);
+}
+
+void AMarbleRaceMenuHUD::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	CompleteQuitIfReady();
+}
+
+void AMarbleRaceMenuHUD::DrawRecordingExitPage(float ScreenWidth, float ScreenHeight)
+{
+	const int32 Dots = static_cast<int32>(FPlatformTime::Seconds() * 2.) % 4;
+	const FString Label = TEXT("正在保存录制") + FString::ChrN(Dots, TEXT('.'));
+	const float Scale = FMath::Min(1.f, ScreenWidth / 600.f);
+	DrawSharpCenteredText(Label, ScreenWidth * .5f, ScreenHeight * .46f,
+		FMath::Max(16, FMath::RoundToInt(HeadingFontSize * Scale)), TextColor, false);
+	DrawSharpCenteredText(TEXT("保存完成后自动退出"), ScreenWidth * .5f, ScreenHeight * .46f + 48.f,
+		FMath::Max(12, FMath::RoundToInt(BodyFontSize * Scale)), MutedTextColor, false);
 }
 
 //~ 绘制 -------------------------------------------------------------------------------
@@ -1090,7 +1188,27 @@ bool AMarbleRaceMenuHUD::DrawTextField(const FString& Text, float X, float Y, fl
 
 	const float TextX = X + 10.0f;
 	const float TextY = Y + Height * 0.5f - BodyFontSize * 0.5f;
-	DrawSharpText(Text, TextX, TextY, BodyFontSize, TextColor, false, false);
+	const auto MeasureWidth = [this](const FString& Value)
+	{
+		if (!GEngine || !GEngine->GetMediumFont() || !FSlateApplication::IsInitialized())
+			return MarbleRaceMenuLayout::ApproximateTextWidth(Value, BodyFontSize);
+		FSlateFontInfo Font = GEngine->GetMediumFont()->GetLegacySlateFontInfo();
+		Font.Size = BodyFontSize;
+		return static_cast<float>(FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(Value, Font).X);
+	};
+	FString VisibleText = Text;
+	int32 HiddenPrefix = 0;
+	if (bFocused)
+	{
+		while (VisibleText.Len() > 1 && MeasureWidth(VisibleText) > Width - 24.f)
+		{
+			const int32 Chop = VisibleText[0] >= 0xD800 && VisibleText[0] <= 0xDBFF ? 2 : 1;
+			VisibleText.RightChopInline(Chop);
+			HiddenPrefix += Chop;
+		}
+	}
+	else VisibleText = FitText(Text, Width - 24.f, BodyFontSize);
+	DrawSharpText(VisibleText, TextX, TextY, BodyFontSize, TextColor, false, false);
 
 	if (bFocused)
 	{
@@ -1099,18 +1217,16 @@ bool AMarbleRaceMenuHUD::DrawTextField(const FString& Text, float X, float Y, fl
 		ActiveTextFieldOrigin = FVector2D(X, Y);
 		ActiveTextFieldSize = FVector2D(FMath::Max(Width, 120.0f), Height);
 
-		const float TextWidth = MarbleRaceMenuLayout::ApproximateTextWidth(Text, BodyFontSize);
+		const float TextWidth = MeasureWidth(VisibleText);
 		const float CaretX = FMath::Min(TextX + TextWidth + 1.0f, X + Width - 6.0f);
 		DrawRect(AccentColor, CaretX, Y + 6.0f, 2.0f, Height - 12.0f);
 
 		// 输入法正在组的那一段加下划线，和界面文本框的反馈一样。
 		if (CompositionBeginIndex != INDEX_NONE && CompositionLength > 0
-			&& CompositionBeginIndex >= 0 && CompositionBeginIndex + CompositionLength <= Text.Len())
+			&& CompositionBeginIndex >= HiddenPrefix && CompositionBeginIndex + CompositionLength <= Text.Len())
 		{
-			const float PrefixWidth = MarbleRaceMenuLayout::ApproximateTextWidth(
-				Text.Left(CompositionBeginIndex), BodyFontSize);
-			const float CompositionWidth = MarbleRaceMenuLayout::ApproximateTextWidth(
-				Text.Mid(CompositionBeginIndex, CompositionLength), BodyFontSize);
+			const float PrefixWidth = MeasureWidth(VisibleText.Left(CompositionBeginIndex - HiddenPrefix));
+			const float CompositionWidth = MeasureWidth(Text.Mid(CompositionBeginIndex, CompositionLength));
 			DrawRect(AccentColor, TextX + PrefixWidth, Y + Height - 8.0f, FMath::Max(4.0f, CompositionWidth), 2.0f);
 		}
 	}
@@ -1123,14 +1239,14 @@ bool AMarbleRaceMenuHUD::DrawTextField(const FString& Text, float X, float Y, fl
 void AMarbleRaceMenuHUD::DrawMainMenuPage(float ScreenWidth, float ScreenHeight)
 {
 	const float CenterX = ScreenWidth * 0.5f;
-	const float TitleY = ScreenHeight * 0.24f;
+	const float TitleY = ScreenHeight * 0.19f;
 	DrawSharpCenteredText(TitleText, CenterX, TitleY, TitleFontSize, TextColor, true);
 	DrawSharpCenteredText(TEXT("侧视弹珠赛"), CenterX, TitleY + TitleFontSize * 0.95f, SmallFontSize + 2,
 	                      MutedTextColor, false);
 
 	const float ButtonWidth = FMath::Max(140.0f, MenuButtonWidth);
-	const float ButtonHeight = FMath::Max(32.0f, MenuButtonHeight);
-	float ButtonY = FMath::Max(TitleY + TitleFontSize * 1.9f, ScreenHeight * 0.42f);
+	const float ButtonHeight = FMath::Clamp(MenuButtonHeight, 32.0f, ScreenHeight * 0.085f);
+	float ButtonY = FMath::Max(TitleY + TitleFontSize * 1.9f, ScreenHeight * 0.34f);
 
 	if (DrawButton(TEXT("开始游戏"), CenterX - ButtonWidth * 0.5f, ButtonY, ButtonWidth, ButtonHeight,
 	               ButtonFontSize, false))
@@ -1154,6 +1270,15 @@ void AMarbleRaceMenuHUD::DrawMainMenuPage(float ScreenWidth, float ScreenHeight)
 	}
 	ButtonY += ButtonHeight + MarbleRaceMenuLayout::Gap;
 
+	if (DrawButton(TEXT("游戏设置"), CenterX - ButtonWidth * 0.5f, ButtonY, ButtonWidth, ButtonHeight,
+	               ButtonFontSize, false))
+	{
+		CurrentPage = EMarbleRaceMenuPage::GameSettings;
+		HoveredSettingIndex = INDEX_NONE;
+		return;
+	}
+	ButtonY += ButtonHeight + MarbleRaceMenuLayout::Gap;
+
 	if (DrawButton(TEXT("退出"), CenterX - ButtonWidth * 0.5f, ButtonY, ButtonWidth, ButtonHeight,
 	               ButtonFontSize, false))
 	{
@@ -1172,35 +1297,170 @@ void AMarbleRaceMenuHUD::DrawMainMenuPage(float ScreenWidth, float ScreenHeight)
 	                      ScreenHeight - 38.0f, SmallFontSize, MutedTextColor, false);
 }
 
+void AMarbleRaceMenuHUD::DrawSettingsTooltip(const FString& Text, const FVector2D& Anchor, const float ScreenWidth, const float ScreenHeight)
+{
+	TArray<FString> Lines;
+	Text.ParseIntoArrayLines(Lines);
+	const float Width = FMath::Min(550.f, ScreenWidth - 48.f);
+	const float Height = 24.f + Lines.Num() * 28.f;
+	const float X = FMath::Clamp(static_cast<float>(Anchor.X), 24.f, ScreenWidth - Width - 24.f);
+	const float Y = FMath::Clamp(static_cast<float>(Anchor.Y), 24.f, ScreenHeight - Height - 24.f);
+	DrawRect(FLinearColor(0.022f, 0.03f, 0.045f, 1.f), X, Y, Width, Height);
+	DrawOutline(X, Y, Width, Height, FLinearColor(0.3f, 0.4f, 0.54f), 1.f);
+	for (int32 Line = 0; Line < Lines.Num(); ++Line)
+	{
+		DrawSharpText(FitText(Lines[Line], Width - 28.f, SmallFontSize), X + 14.f, Y + 12.f + Line * 28.f,
+			SmallFontSize, TextColor, false, false);
+	}
+}
+
+void AMarbleRaceMenuHUD::DrawGameSettingsPage(float ScreenWidth, float ScreenHeight)
+{
+	const float Width = FMath::Min(900.f, ScreenWidth - 80.f);
+	const float X = (ScreenWidth - Width) * 0.5f;
+	const float Y = FMath::Max(42.f, ScreenHeight * 0.12f);
+	DrawSharpText(TEXT("游戏设置"), X, Y, HeadingFontSize + 6, TextColor, false, false);
+	const float TabsY = Y + 60.f;
+	const TCHAR* Tabs[] = {TEXT("按键设置"), TEXT("显示设置"), TEXT("音频设置"), TEXT("录制设置")};
+	for (int32 Tab = 0; Tab < 4; ++Tab)
+	{
+		if (DrawButton(Tabs[Tab], X + Tab * 156.f, TabsY, 144.f, 40.f, BodyFontSize, SettingsTabIndex == Tab))
+		{
+			SettingsTabIndex = Tab;
+			HoveredSettingIndex = INDEX_NONE;
+		}
+	}
+	const float PanelY = TabsY + 56.f;
+	const float PanelHeight = 238.f;
+	DrawPanel(X, PanelY, Width, PanelHeight, false);
+	auto* Settings = GetGameInstance()->GetSubsystem<UMarbleRaceSettingsSubsystem>();
+	const TCHAR* DisplayNames[] = {TEXT("稳定名称显示"), TEXT("终点慢动作"), TEXT("倒计时缩放过渡")};
+	const TCHAR* DisplayHelp[] = {
+		TEXT("减轻姓名抖动，关闭后保留原有滚动效果。"),
+		TEXT("临近终点时放慢场景，冲线阶段约 2.4 秒。\nBGM 仍以正常速度播放。"),
+		TEXT("倒计时开始时镜头由近拉远，约 1.8 秒完成。")};
+	const TCHAR* KeyNames[] = {TEXT("锁定 BGM"), TEXT("解锁 BGM"), TEXT("中断比赛")};
+	const TCHAR* KeyLabels[] = {TEXT("L"), TEXT("U"), TEXT("ESC")};
+	const TCHAR* KeyHelp[] = {
+		TEXT("保持当前 BGM。左下角出现小红点表示已锁定。"),
+		TEXT("解锁后立即检查当前领跑角色的 BGM。"),
+		TEXT("立即返回主菜单，并丢弃本场录制。")};
+	const TCHAR* AudioNames[] = {TEXT("统一 BGM 响度"), TEXT("赛后播完当前 BGM"), TEXT("后台播放 BGM")};
+	const TCHAR* AudioHelp[] = {
+		TEXT("让各角色歌曲的整体响度一致，保留歌曲本身的强弱变化。\n比赛和菜单试听使用同一校准。"),
+		TEXT("最后一颗弹珠冲线后，当前歌曲继续到本轮结尾。\n播完停止，不再循环；退出比赛时立即停止。"),
+		TEXT("开赛后所有角色歌曲从头同步推进，只有领跑者可听到。\n忽略角色的播放起点；歌曲播完后从头循环。")};
+	const TCHAR* RecordingNames[] = {TEXT("自动录制比赛"), TEXT("录制保存位置")};
+	const TCHAR* RecordingHelp[] = {
+		TEXT("录制游戏画面与声音，排行榜展示结束后保存 MP4。\nESC 中断会丢弃本场录制；最高 1080p、30 帧。"),
+		TEXT("打开 Saved/Recordings 文件夹。\n录制只包含游戏画面和游戏声音，不录桌面或麦克风。")};
+	const int32 RowCount = SettingsTabIndex == 3 ? 2 : 3;
+	int32 HoveredRow = INDEX_NONE;
+	for (int32 Row = 0; Row < RowCount; ++Row)
+	{
+		const float RowY = PanelY + 16.f + Row * 68.f;
+		const bool bHovered = IsMouseOverRect(X + 12.f, RowY, Width - 24.f, 62.f);
+		if (bHovered) HoveredRow = Row;
+		DrawRect(bHovered ? ButtonColor : FLinearColor(0.045f, 0.06f, 0.086f), X + 12.f, RowY, Width - 24.f, 62.f);
+		DrawSharpText(SettingsTabIndex == 1 ? DisplayNames[Row] : SettingsTabIndex == 2 ? AudioNames[Row]
+			: SettingsTabIndex == 3 ? RecordingNames[Row] : KeyNames[Row], X + 32.f, RowY + 18.f,
+			BodyFontSize, TextColor, false, false);
+		const float ControlX = X + Width - 144.f;
+		if (SettingsTabIndex == 1)
+		{
+			const bool bEnabled = Settings && (Row == 0 ? Settings->AreMarbleNamesStable()
+				: Row == 1 ? Settings->IsFinishSlowMotionEnabled() : Settings->IsCountdownZoomEnabled());
+			if (DrawButton(bEnabled ? TEXT("启用") : TEXT("禁用"), ControlX, RowY + 13.f, 112.f, 36.f, BodyFontSize, bEnabled) && Settings)
+			{
+				if (Row == 0) Settings->SetStableMarbleNames(!bEnabled);
+				else if (Row == 1) Settings->SetFinishSlowMotion(!bEnabled);
+				else Settings->SetCountdownZoom(!bEnabled);
+			}
+		}
+		else if (SettingsTabIndex == 2 || (SettingsTabIndex == 3 && Row == 0))
+		{
+			const bool bEnabled = Settings && (SettingsTabIndex == 3 ? Settings->ShouldRecordRace()
+				: Row == 0 ? Settings->IsMusicNormalizationEnabled()
+				: Row == 1 ? Settings->ShouldFinishBGM() : Settings->IsBackgroundMusicEnabled());
+			if (DrawButton(bEnabled ? TEXT("启用") : TEXT("禁用"), ControlX, RowY + 13.f, 112.f, 36.f, BodyFontSize, bEnabled) && Settings)
+			{
+				if (SettingsTabIndex == 3) Settings->SetRecordRace(!bEnabled);
+				else if (Row == 0) Settings->SetMusicNormalization(!bEnabled);
+				else if (Row == 1) Settings->SetFinishBGM(!bEnabled);
+				else Settings->SetBackgroundMusic(!bEnabled);
+			}
+		}
+		else if (SettingsTabIndex == 3)
+		{
+			if (DrawButton(TEXT("打开文件夹"), ControlX - 32.f, RowY + 13.f, 144.f, 36.f, SmallFontSize, false))
+			{
+				const FString Folder = UMarbleRaceRecorderSubsystem::GetRecordingsDirectory();
+				IFileManager::Get().MakeDirectory(*Folder, true);
+				FPlatformProcess::ExploreFolder(*Folder);
+			}
+		}
+		else
+		{
+			DrawRect(ButtonColor, ControlX, RowY + 13.f, 112.f, 36.f);
+			DrawOutline(ControlX, RowY + 13.f, 112.f, 36.f, FLinearColor(0.25f, 0.32f, 0.42f), 1.f);
+			DrawSharpCenteredText(KeyLabels[Row], ControlX + 56.f, RowY + 31.f,
+				BodyFontSize + 2, TextColor, false);
+		}
+	}
+	const float BottomY = PanelY + PanelHeight + 24.f;
+	if (DrawButton(TEXT("返回主菜单"), X, BottomY, 168.f, 40.f, BodyFontSize, false)) HandleEscapeToMainMenu();
+	DrawSharpText(TEXT("设置自动保存"), X + Width - 140.f, BottomY + 10.f, SmallFontSize, MutedTextColor, false, false);
+	if (SettingsTabIndex == 3)
+	{
+		const auto* Recorder = GetGameInstance()->GetSubsystem<UMarbleRaceRecorderSubsystem>();
+		DrawSharpText(FitText(Recorder->GetStatus().IsEmpty() ? TEXT("保存至 Saved/Recordings") : Recorder->GetStatus(), Width, SmallFontSize),
+			X, PanelY + 166.f, SmallFontSize, MutedTextColor, false, false);
+	}
+	const double Now = GetWorld()->GetRealTimeSeconds();
+	if (HoveredRow != HoveredSettingIndex)
+	{
+		HoveredSettingIndex = HoveredRow;
+		SettingHoverStartedAt = Now;
+	}
+	if (HoveredRow != INDEX_NONE && Now - SettingHoverStartedAt >= 0.35)
+	{
+		float MouseX = X, MouseY = BottomY;
+		if (APlayerController* Controller = GetOwningPlayerController()) Controller->GetMousePosition(MouseX, MouseY);
+		DrawSettingsTooltip(SettingsTabIndex == 1 ? DisplayHelp[HoveredRow] : SettingsTabIndex == 2 ? AudioHelp[HoveredRow]
+			: SettingsTabIndex == 3 ? RecordingHelp[HoveredRow] : KeyHelp[HoveredRow],
+			FVector2D(MouseX + 18.f, MouseY + 24.f), ScreenWidth, ScreenHeight);
+	}
+}
+
 void AMarbleRaceMenuHUD::DrawCharacterSetupPage(float ScreenWidth, float ScreenHeight)
 {
 	const float Margin = MarbleRaceMenuLayout::Margin;
 	DrawSharpText(TEXT("角色设置"), Margin, 12.0f, HeadingFontSize + 6, TextColor, false, false);
 	DrawSharpText(TEXT("点击左侧小球选中，再在右侧修改名称／颜色／头像／主题曲"),
-	              Margin, 12.0f + (HeadingFontSize + 6) + 6.0f, SmallFontSize, MutedTextColor, false, false);
+	              Margin, 58.0f, SmallFontSize, MutedTextColor, false, false);
 
 	const float ContentTop = MarbleRaceMenuLayout::HeaderHeight + 10.0f;
 	const float HintTop = ScreenHeight - MarbleRaceMenuLayout::BottomBarHeight - MarbleRaceMenuLayout::HintHeight;
 	const float ContentHeight = FMath::Max(180.0f, HintTop - ContentTop - 6.0f);
 
-	const float ListWidth = FMath::Clamp(ScreenWidth * ListWidthFraction, 280.0f, 640.0f);
+	const float ListWidth = FMath::Clamp(ScreenWidth * FMath::Min(ListWidthFraction, 0.32f), 280.0f, 390.0f);
 	const float ListX = Margin;
 	const float DetailX = ListX + ListWidth + MarbleRaceMenuLayout::Gap;
 	const float DetailWidth = FMath::Max(300.0f, ScreenWidth - DetailX - Margin);
 
 	DrawRosterList(ListX, ContentTop, ListWidth, ContentHeight);
 
-	float DetailY = ContentTop;
-	DrawEntrySettings(DetailX, DetailY, DetailWidth);
+	DrawPanel(DetailX, ContentTop, DetailWidth, ContentHeight, false);
+	DetailBottom = ContentTop + ContentHeight - 16.f;
+	float DetailY = ContentTop + 16.f;
+	DrawEntrySettings(DetailX + 18.f, DetailY, DetailWidth - 36.f);
 
 	// 提示行：规格里的限制，加上头像选择器读取的文件夹。
-	DrawSharpText(TEXT("主题曲需先在编辑器中导入音频资源，然后在这里选择"), Margin, HintTop, SmallFontSize + 1,
+	DrawSharpText(TEXT("修改自动保存 · 左侧参赛开关决定下一场名单 · Esc 返回主菜单"), Margin, HintTop, SmallFontSize,
 	              MutedTextColor, false, false);
-	DrawSharpText(FString::Printf(TEXT("头像文件夹：%s"), *UMarbleRaceRosterSubsystem::GetPortraitFolderPath()),
-	              Margin, HintTop + 20.0f, SmallFontSize, MutedTextColor, false, false);
 	if (!StatusMessage.IsEmpty())
 	{
-		DrawSharpText(StatusMessage, ScreenWidth * 0.5f, HintTop + 20.0f, SmallFontSize + 1,
+		DrawSharpText(FitText(StatusMessage, ScreenWidth - Margin * 2.f, SmallFontSize), Margin, HintTop + 20.0f, SmallFontSize,
 		              bStatusIsError ? ErrorColor : AccentColor, false, false);
 	}
 
@@ -1218,7 +1478,7 @@ void AMarbleRaceMenuHUD::DrawRosterList(float ListX, float ListY, float ListWidt
 	const float RowsBottom = RowsTop + RowsHeight;
 
 	const int32 EntryCount = GetEntryTotal();
-	const float RowHeightPixels = FMath::Max(30.0f, RowHeight);
+	const float RowHeightPixels = FMath::Max(58.0f, RowHeight);
 	const float ContentHeight = EntryCount * RowHeightPixels;
 	const float MaxScroll = FMath::Max(0.0f, ContentHeight - RowsHeight);
 
@@ -1267,17 +1527,20 @@ void AMarbleRaceMenuHUD::DrawRosterList(float ListX, float ListY, float ListWidt
 	}
 	RosterScrollOffset = FMath::Clamp(RosterScrollOffset, 0.0f, MaxScroll);
 
-	// 先画行；页眉和页脚之后盖上去，
-	// 露一半的行不会画出列表矩形。
+	// Only draw complete rows: Canvas glyphs can extend past a partially
+	// covered row and otherwise bleed through the footer into the hints.
+	const bool bPreviouslyConsumed = bClickConsumedThisFrame;
+	if (!bMouseOverRows) bClickConsumedThisFrame = true;
 	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
 		const float RowY = RowsTop + EntryIndex * RowHeightPixels - RosterScrollOffset;
-		if (RowY + RowHeightPixels < RowsTop || RowY > RowsBottom)
+		if (RowY < RowsTop || RowY + RowHeightPixels > RowsBottom)
 		{
 			continue;
 		}
 		DrawRosterRow(EntryIndex, ListX + 4.0f, RowY, ListWidth - 8.0f, RowHeightPixels);
 	}
+	if (!bMouseOverRows) bClickConsumedThisFrame = bPreviouslyConsumed;
 
 	// 页眉
 	DrawRect(PanelColor, ListX + 1.0f, ListY + 1.0f, ListWidth - 2.0f, HeaderHeight);
@@ -1296,7 +1559,7 @@ void AMarbleRaceMenuHUD::DrawRosterList(float ListX, float ListY, float ListWidt
 	}
 
 	const int32 FirstVisibleRow = EntryCount > 0
-		                              ? FMath::Clamp(FMath::FloorToInt(RosterScrollOffset / RowHeightPixels) + 1, 1,
+		                              ? FMath::Clamp(FMath::CeilToInt(RosterScrollOffset / RowHeightPixels) + 1, 1,
 		                                             EntryCount)
 		                              : 0;
 	DrawSharpText(FString::Printf(TEXT("第 %d / %d 行"), FirstVisibleRow, EntryCount), ListX + 166.0f,
@@ -1344,11 +1607,12 @@ void AMarbleRaceMenuHUD::DrawRosterRow(int32 EntryIndex, float RowX, float RowY,
 	// 第一行姓名，第二行主题曲：两行短字不会冲到
 	// 参赛开关上，一行长字则会。
 	const float TextX = ThumbnailX + ThumbnailSize + 10.0f;
-	DrawSharpText(GetEntryName(EntryIndex), TextX, RowY + 5.0f, BodyFontSize,
+	const float TextWidth = RowX + RowWidth - 66.f - TextX;
+	DrawSharpText(FitText(GetEntryName(EntryIndex), TextWidth, BodyFontSize), TextX, RowY + 5.0f, BodyFontSize,
 	              bEnabled ? TextColor : MutedTextColor, false, false);
 
 	const FString ThemeName = Roster ? Roster->GetThemeDisplayName(EntryIndex) : FString(TEXT("-"));
-	DrawSharpText(ShortenForRow(ThemeName, 26), TextX, RowY + RowHeightPixels * 0.5f + 3.0f, SmallFontSize,
+	DrawSharpText(FitText(ThemeName, TextWidth, SmallFontSize), TextX, RowY + 32.f, SmallFontSize,
 	              bEnabled ? MutedTextColor : FLinearColor(0.45f, 0.47f, 0.50f), false, false);
 
 	// 参赛开关。浅色表示参加下一场，深色表示跳过。
@@ -1365,6 +1629,7 @@ void AMarbleRaceMenuHUD::DrawRosterRow(int32 EntryIndex, float RowX, float RowY,
 	{
 		// 选中另一行之前，先把正在编辑的内容写回去。
 		CommitFocusedText();
+		if (SelectedEntryIndex != EntryIndex) StopThemePreview();
 		SelectedEntryIndex = EntryIndex;
 		ThemePageIndex = 0;
 		PortraitFilePageIndex = 0;
@@ -1385,19 +1650,28 @@ void AMarbleRaceMenuHUD::DrawEntrySettings(float PanelX, float& PanelY, float Pa
 		return;
 	}
 
-	DrawNameSection(PanelX, PanelY, PanelWidth);
-	DrawColorSection(PanelX, PanelY, PanelWidth);
-
-	// 下面两列：左边头像，右边主题曲，720p 窗口里都能放下。
-	const float ColumnGap = 18.0f;
-	const float LeftColumnWidth = FMath::Max(200.0f, (PanelWidth - ColumnGap) * 0.5f);
-	const float RightColumnWidth = FMath::Max(200.0f, PanelWidth - ColumnGap - LeftColumnWidth);
-
-	float LeftColumnY = PanelY;
-	float RightColumnY = PanelY;
-	DrawPortraitSection(PanelX, LeftColumnY, LeftColumnWidth);
-	DrawThemeSection(PanelX + LeftColumnWidth + ColumnGap, RightColumnY, RightColumnWidth);
-	PanelY = FMath::Max(LeftColumnY, RightColumnY);
+	DrawSharpText(FitText(GetEntryName(SelectedEntryIndex), PanelWidth, HeadingFontSize),
+		PanelX, PanelY, HeadingFontSize, TextColor, false, false);
+	PanelY += 48.f;
+	const TCHAR* Tabs[] = {TEXT("基本信息"), TEXT("头像"), TEXT("主题曲")};
+	const float TabWidth = FMath::Min(140.f, (PanelWidth - 16.f) / 3.f);
+	for (int32 Tab = 0; Tab < 3; ++Tab)
+	{
+		if (DrawButton(Tabs[Tab], PanelX + Tab * (TabWidth + 8.f), PanelY, TabWidth, 34.f, BodyFontSize, DetailTabIndex == Tab))
+		{
+			CommitFocusedText();
+			if (Tab != 2) StopThemePreview();
+			DetailTabIndex = Tab;
+		}
+	}
+	PanelY += 56.f;
+	if (DetailTabIndex == 0)
+	{
+		DrawNameSection(PanelX, PanelY, PanelWidth);
+		DrawColorSection(PanelX, PanelY, PanelWidth);
+	}
+	else if (DetailTabIndex == 1) DrawPortraitSection(PanelX, PanelY, PanelWidth);
+	else DrawThemeSection(PanelX, PanelY, PanelWidth);
 }
 
 void AMarbleRaceMenuHUD::DrawNameSection(float PanelX, float& PanelY, float PanelWidth)
@@ -1406,54 +1680,52 @@ void AMarbleRaceMenuHUD::DrawNameSection(float PanelX, float& PanelY, float Pane
 	DrawSharpText(TEXT("名称（点击后输入，支持中文输入法）"), PanelX, PanelY, SmallFontSize + 1,
 	              MutedTextColor, false, false);
 
-	const float FieldHeight = 36.0f;
+	const float FieldHeight = 42.0f;
 	const float FieldWidth = FMath::Min(PanelWidth, 420.0f);
 	const FString ShownName = bFocused ? NameEditBuffer : GetEntryName(SelectedEntryIndex);
-	if (DrawTextField(ShownName, PanelX, PanelY + 22.0f, FieldWidth, FieldHeight, bFocused))
+	if (DrawTextField(ShownName, PanelX, PanelY + 28.0f, FieldWidth, FieldHeight, bFocused))
 	{
 		FocusTextField(EMarbleRaceMenuTextField::DisplayName);
 	}
 
 	if (bFocused)
 	{
-		DrawSharpText(TEXT("Enter 保存　Esc 取消　Tab 切换输入框"), PanelX + FieldWidth + 12.0f,
-		              PanelY + 22.0f + FieldHeight * 0.5f - SmallFontSize * 0.5f, SmallFontSize, MutedTextColor, false,
+		DrawSharpText(TEXT("Enter 保存　Esc 取消"), PanelX,
+		              PanelY + 78.f, SmallFontSize, MutedTextColor, false,
 		              false);
 	}
 
-	PanelY += 22.0f + FieldHeight + 14.0f;
+	PanelY += 112.f;
 }
 
 void AMarbleRaceMenuHUD::DrawColorSection(float PanelX, float& PanelY, float PanelWidth)
 {
-	DrawSharpText(TEXT("颜色（圆盘、名字与尾迹都用它）"), PanelX, PanelY, SmallFontSize + 1, MutedTextColor, false, false);
+	DrawSharpText(TEXT("弹珠颜色（保持不透明）"), PanelX, PanelY, SmallFontSize + 1, MutedTextColor, false, false);
 
-	const float SwatchY = PanelY + 26.0f;
+	const float SwatchY = PanelY + 40.0f;
 	const float Spacing = 34.0f;
+	const int32 Columns = FMath::Max(1, FMath::FloorToInt((PanelWidth - 4.f) / Spacing));
 	const FLinearColor CurrentColor = GetEntryColor(SelectedEntryIndex);
 
 	for (int32 SwatchIndex = 0; SwatchIndex < PaletteColors.Num(); ++SwatchIndex)
 	{
-		const float SwatchX = PanelX + 12.0f + SwatchIndex * Spacing;
-		if (SwatchX + 16.0f > PanelX + PanelWidth)
-		{
-			break;
-		}
+		const float SwatchX = PanelX + 16.0f + (SwatchIndex % Columns) * Spacing;
+		const float RowY = SwatchY + (SwatchIndex / Columns) * Spacing;
 
 		const FLinearColor SwatchColor = GetPaletteColorAt(SwatchIndex);
-		const bool bHovered = IsMouseOverRect(SwatchX - 14.0f, SwatchY - 14.0f, 28.0f, 28.0f);
+		const bool bHovered = IsMouseOverRect(SwatchX - 14.0f, RowY - 14.0f, 28.0f, 28.0f);
 
-		DrawCircleBand(SwatchX, SwatchY, 0.0f, bHovered ? 13.0f : 11.0f, SwatchColor);
+		DrawCircleBand(SwatchX, RowY, 0.0f, bHovered ? 13.0f : 11.0f, SwatchColor);
 		if (SwatchColor.Equals(CurrentColor, 0.02f))
 		{
-			DrawCircleBand(SwatchX, SwatchY, 13.5f, 15.5f, AccentColor);
+			DrawCircleBand(SwatchX, RowY, 13.5f, 15.5f, AccentColor);
 		}
 		else if (bHovered)
 		{
-			DrawCircleBand(SwatchX, SwatchY, 13.0f, 15.0f, TextColor);
+			DrawCircleBand(SwatchX, RowY, 13.0f, 15.0f, TextColor);
 		}
 
-		if (ConsumeClickInRect(SwatchX - 16.0f, SwatchY - 16.0f, 32.0f, 32.0f))
+		if (ConsumeClickInRect(SwatchX - 16.0f, RowY - 16.0f, 32.0f, 32.0f))
 		{
 			if (UMarbleRaceRosterSubsystem* Roster = GetRoster())
 			{
@@ -1462,14 +1734,14 @@ void AMarbleRaceMenuHUD::DrawColorSection(float PanelX, float& PanelY, float Pan
 		}
 	}
 
-	PanelY = SwatchY + 28.0f;
+	PanelY = SwatchY + FMath::DivideAndRoundUp(PaletteColors.Num(), Columns) * Spacing;
 }
 
 void AMarbleRaceMenuHUD::DrawPortraitSection(float PanelX, float& PanelY, float PanelWidth)
 {
 	UMarbleRaceRosterSubsystem* Roster = GetRoster();
 	DrawSharpText(TEXT("头像图片"), PanelX, PanelY, SmallFontSize + 1, MutedTextColor, false, false);
-	float CursorY = PanelY + 24.0f;
+	float CursorY = PanelY + 30.0f;
 
 	// 当前头像，以及它从哪里来。
 	const float PreviewSize = 54.0f;
@@ -1484,19 +1756,20 @@ void AMarbleRaceMenuHUD::DrawPortraitSection(float PanelX, float& PanelY, float 
 	const FString SourcePath = GetEntrySourcePath(SelectedEntryIndex);
 	DrawSharpText(TEXT("当前："), PanelX + PreviewSize + 10.0f, CursorY + 2.0f, SmallFontSize, MutedTextColor, false,
 	              false);
-	DrawSharpText(SourcePath.IsEmpty() ? TEXT("（没有图片，使用彩色圆盘＋首字）") : ShortenForRow(SourcePath, 30),
-	              PanelX + PreviewSize + 10.0f, CursorY + 20.0f, SmallFontSize,
+	DrawSharpText(FitText(SourcePath.IsEmpty() ? TEXT("（没有图片，使用彩色圆盘＋首字）") : SourcePath,
+	                      PanelWidth - PreviewSize - 10.f, SmallFontSize),
+	              PanelX + PreviewSize + 10.0f, CursorY + 28.0f, SmallFontSize,
 	              SourcePath.IsEmpty() ? MutedTextColor : TextColor, false, false);
 	CursorY += PreviewSize + 10.0f;
 
 	// Saved/Portraits 里找到的文件，分页显示，列表不会超出面板。
 	DrawSharpText(TEXT("Saved/Portraits 里的图片（点击即用）"), PanelX, CursorY, SmallFontSize, MutedTextColor, false, false);
-	CursorY += 20.0f;
+	CursorY += 28.0f;
 
 	static const TArray<FString> EmptyFileList;
 	const TArray<FString>& FolderFiles = Roster ? Roster->GetPortraitFolderFiles() : EmptyFileList;
 	const int32 FileCount = FolderFiles.Num();
-	const int32 FilesPerPage = FMath::Max(1, PortraitFilesPerPage);
+	const int32 FilesPerPage = FMath::Clamp(FMath::FloorToInt((DetailBottom - CursorY - 168.f) / 28.f), 1, FMath::Max(1, PortraitFilesPerPage));
 	const int32 FilePageCount = FMath::Max(1, FMath::DivideAndRoundUp(FileCount, FilesPerPage));
 	PortraitFilePageIndex = FMath::Clamp(PortraitFilePageIndex, 0, FilePageCount - 1);
 	const int32 FirstFileIndex = PortraitFilePageIndex * FilesPerPage;
@@ -1505,7 +1778,7 @@ void AMarbleRaceMenuHUD::DrawPortraitSection(float PanelX, float& PanelY, float 
 	{
 		DrawSharpText(TEXT("文件夹为空：把 png/jpg 放进去后点「刷新列表」"), PanelX, CursorY, SmallFontSize,
 		              MutedTextColor, false, false);
-		CursorY += 22.0f;
+		CursorY += 30.0f;
 	}
 
 	for (int32 Slot = 0; Slot < FilesPerPage; ++Slot)
@@ -1515,7 +1788,7 @@ void AMarbleRaceMenuHUD::DrawPortraitSection(float PanelX, float& PanelY, float 
 		{
 			break;
 		}
-		if (DrawButton(ShortenForRow(FolderFiles[FileIndex], 22), PanelX, CursorY + Slot * 28.0f, PanelWidth, 26.0f,
+		if (DrawButton(FitText(FolderFiles[FileIndex], PanelWidth - 24.f, SmallFontSize), PanelX, CursorY + Slot * 28.0f, PanelWidth, 26.0f,
 		               SmallFontSize, false))
 		{
 			ImportPortraitFromPath(FPaths::Combine(UMarbleRaceRosterSubsystem::GetPortraitFolderPath(),
@@ -1542,9 +1815,9 @@ void AMarbleRaceMenuHUD::DrawPortraitSection(float PanelX, float& PanelY, float 
 
 	// 手填绝对路径，给不在上面那个文件夹里的图片用。
 	DrawSharpText(TEXT("或输入图片的绝对路径"), PanelX, CursorY, SmallFontSize, MutedTextColor, false, false);
-	CursorY += 20.0f;
+	CursorY += 28.0f;
 
-	const float PathFieldHeight = 32.0f;
+	const float PathFieldHeight = 38.0f;
 	const float ImportButtonWidth = 76.0f;
 	const float PathFieldWidth = FMath::Max(120.0f, PanelWidth - ImportButtonWidth - 8.0f);
 	if (DrawTextField(PathEditBuffer, PanelX, CursorY, PathFieldWidth, PathFieldHeight,
@@ -1578,27 +1851,138 @@ void AMarbleRaceMenuHUD::DrawPortraitSection(float PanelX, float& PanelY, float 
 	}
 	CursorY += 34.0f;
 
-	if (!StatusMessage.IsEmpty())
-	{
-		DrawSharpText(ShortenForRow(StatusMessage, 46), PanelX, CursorY, SmallFontSize,
-		              bStatusIsError ? ErrorColor : AccentColor, false, false);
-	}
 	PanelY = CursorY + 20.0f;
+}
+
+void AMarbleRaceMenuHUD::StopThemePreview()
+{
+	PreviewPlayer->Stop();
+	PreviewPlayer->SetSound(nullptr);
+	PreviewMusicPath.Reset();
+	PreviewPlayback = {};
+	bPreviewPlaying = bDraggingThemeSeek = bResumeAfterThemeSeek = false;
+}
+
+void AMarbleRaceMenuHUD::EnsureThemePreview()
+{
+	UMarbleRaceRosterSubsystem* Roster = GetRoster();
+	if (!Roster || !Roster->IsValidIndex(SelectedEntryIndex))
+	{
+		StopThemePreview();
+		return;
+	}
+	const FSoftObjectPath Path = Roster->GetEntries()[SelectedEntryIndex].ThemeMusic.ToSoftObjectPath();
+	if (PreviewPlayback.RosterIndex == SelectedEntryIndex && PreviewMusicPath == Path) return;
+	StopThemePreview();
+	PreviewMusicPath = Path;
+	PreviewPlayback = {SelectedEntryIndex, 0.0, 0.0, Roster->GetThemeDuration(SelectedEntryIndex), 0.0};
+	PreviewPlayer->SetSound(Roster->GetEntries()[SelectedEntryIndex].ThemeMusic.LoadSynchronous());
+}
+
+void AMarbleRaceMenuHUD::ToggleThemePreview(const double Now)
+{
+	if (!PreviewPlayer->Sound || PreviewPlayback.Duration <= 0.0) return;
+	const double Position = PreviewPlayback.PositionAt(Now);
+	bPreviewPlaying = !bPreviewPlaying;
+	PreviewPlayback.StartedAt = Now;
+	PreviewPlayback.StartedFrom = Position;
+	PreviewPlayback.StopsAt = bPreviewPlaying ? TNumericLimits<double>::Max() : Now;
+	if (bPreviewPlaying) PreviewPlayer->Play(static_cast<float>(Position));
+	else PreviewPlayer->Stop();
+}
+
+void AMarbleRaceMenuHUD::SeekThemePreview(const double Seconds, const double Now)
+{
+	PreviewPlayback.StartedFrom = FMarbleThemePlayback::ClampStartTime(Seconds, PreviewPlayback.Duration);
+	PreviewPlayback.StartedAt = Now;
+	PreviewPlayback.StopsAt = bPreviewPlaying ? TNumericLimits<double>::Max() : Now;
+	if (bPreviewPlaying) PreviewPlayer->Play(static_cast<float>(PreviewPlayback.StartedFrom));
+}
+
+void AMarbleRaceMenuHUD::DrawThemePreview(float PanelX, float& PanelY, float PanelWidth)
+{
+	EnsureThemePreview();
+	if (const auto* Settings = GetGameInstance()->GetSubsystem<UMarbleRaceSettingsSubsystem>())
+		PreviewPlayer->SetVolumeMultiplier(0.65f * Settings->GetThemeVolumeGain(PreviewMusicPath));
+	const double Now = FPlatformTime::Seconds();
+	const auto TimeLabel = [](double Seconds)
+	{
+		const int32 Whole = FMath::Max(0, FMath::FloorToInt(Seconds));
+		return FString::Printf(TEXT("%d:%02d"), Whole / 60, Whole % 60);
+	};
+	if (DrawButton(bPreviewPlaying ? TEXT("暂停试听") : TEXT("播放试听"), PanelX, PanelY,
+		110.f, 32.f, SmallFontSize, bPreviewPlaying)) ToggleThemePreview(Now);
+	DrawSharpText(TimeLabel(PreviewPlayback.PositionAt(Now)) + TEXT(" / ") + TimeLabel(PreviewPlayback.Duration),
+		PanelX + 126.f, PanelY + 6.f, SmallFontSize, MutedTextColor, false, false);
+	PanelY += 38.f;
+
+	// 拖动时暂停，释放后从新位置继续，避免每帧重启音频产生杂音。
+	APlayerController* Controller = GetOwningPlayerController();
+	if (PreviewPlayback.Duration > 0.0 && ConsumeClickInRect(PanelX, PanelY, PanelWidth, 24.f))
+	{
+		bDraggingThemeSeek = true;
+		bResumeAfterThemeSeek = bPreviewPlaying;
+		if (bPreviewPlaying) ToggleThemePreview(Now);
+	}
+	if (bDraggingThemeSeek && Controller)
+	{
+		float MouseX = 0.f, MouseY = 0.f;
+		if (Controller->GetMousePosition(MouseX, MouseY))
+			SeekThemePreview(FMath::Clamp((MouseX - PanelX) / PanelWidth, 0.f, 1.f) * PreviewPlayback.Duration, Now);
+		if (!Controller->IsInputKeyDown(EKeys::LeftMouseButton))
+		{
+			bDraggingThemeSeek = false;
+			if (bResumeAfterThemeSeek) ToggleThemePreview(Now);
+			bResumeAfterThemeSeek = false;
+		}
+	}
+	DrawRect(ButtonColor, PanelX, PanelY + 9.f, PanelWidth, 6.f);
+	const float Fraction = PreviewPlayback.Duration > 0.0 ? PreviewPlayback.PositionAt(Now) / PreviewPlayback.Duration : 0.f;
+	DrawRect(AccentColor, PanelX, PanelY + 9.f, PanelWidth * Fraction, 6.f);
+	DrawCircleBand(PanelX + PanelWidth * Fraction, PanelY + 12.f, 0.f, 6.f, TextColor);
+	PanelY += 30.f;
+
+	UMarbleRaceRosterSubsystem* Roster = GetRoster();
+	if (Roster && Roster->IsValidIndex(SelectedEntryIndex))
+	{
+		DrawSharpText(TEXT("首次播放起点"), PanelX, PanelY + 7.f, SmallFontSize, TextColor, false, false);
+		const bool bFocused = FocusedTextField == EMarbleRaceMenuTextField::MusicStartTime;
+		const FString SecondsText = bFocused ? MusicStartEditBuffer
+			: FString::Printf(TEXT("%.2f"), Roster->GetEntries()[SelectedEntryIndex].ThemeStartTimeSeconds);
+		if (DrawTextField(SecondsText, PanelX + 140.f, PanelY, 88.f, 32.f, bFocused))
+			FocusTextField(EMarbleRaceMenuTextField::MusicStartTime);
+		DrawSharpText(TEXT("秒"), PanelX + 232.f, PanelY + 7.f, SmallFontSize, MutedTextColor, false, false);
+		if (DrawButton(TEXT("保存"), PanelX + 258.f, PanelY, 54.f, 32.f, SmallFontSize, false)) CommitFocusedText();
+		if (DrawButton(TEXT("设为当前时间"), PanelX + 320.f, PanelY, 120.f, 32.f, SmallFontSize, false))
+		{
+			CommitFocusedText();
+			if (Roster->SetThemeStartTime(SelectedEntryIndex, PreviewPlayback.PositionAt(Now)))
+				SetStatus(TEXT("首次播放起点已保存"), false);
+		}
+		if (DrawButton(TEXT("归零"), PanelX + 448.f, PanelY, 60.f, 32.f, SmallFontSize, false))
+		{
+			CommitFocusedText();
+			if (Roster->SetThemeStartTime(SelectedEntryIndex, 0.f)) SetStatus(TEXT("首次播放从头开始"), false);
+		}
+	}
+	PanelY += 48.f;
 }
 
 void AMarbleRaceMenuHUD::DrawThemeSection(float PanelX, float& PanelY, float PanelWidth)
 {
 	UMarbleRaceRosterSubsystem* Roster = GetRoster();
 	DrawSharpText(TEXT("主题曲（该球领先时播放）"), PanelX, PanelY, SmallFontSize + 1, MutedTextColor, false, false);
-	float CursorY = PanelY + 24.0f;
+	float CursorY = PanelY + 30.0f;
 
-	DrawSharpText(FString::Printf(TEXT("当前：%s"),
-	                              Roster ? *Roster->GetThemeDisplayName(SelectedEntryIndex) : TEXT("-")),
+	DrawSharpText(FitText(FString::Printf(TEXT("当前：%s"),
+	                              Roster ? *Roster->GetThemeDisplayName(SelectedEntryIndex) : TEXT("-")), PanelWidth, SmallFontSize),
 	              PanelX, CursorY, SmallFontSize, AccentColor, false, false);
-	CursorY += 20.0f;
+	CursorY += 28.0f;
+	const float PreviewStartLabelY = CursorY + 68.f;
+	DrawThemePreview(PanelX, CursorY, PanelWidth);
 
 	const int32 ThemeCount = Roster ? Roster->GetAvailableThemes().Num() : 0;
-	const int32 ThemesPerPageCount = FMath::Max(1, ThemesPerPage);
+	const int32 ThemesPerPageCount = FMath::Clamp(FMath::FloorToInt((DetailBottom - CursorY - 76.f) / 28.f), 1, FMath::Max(1, ThemesPerPage));
 	const int32 ThemePageCount = FMath::Max(1, FMath::DivideAndRoundUp(ThemeCount, ThemesPerPageCount));
 	ThemePageIndex = FMath::Clamp(ThemePageIndex, 0, ThemePageCount - 1);
 	const int32 FirstThemeIndex = ThemePageIndex * ThemesPerPageCount;
@@ -1627,12 +2011,17 @@ void AMarbleRaceMenuHUD::DrawThemeSection(float PanelX, float& PanelY, float Pan
 			}
 
 			const TSoftObjectPtr<USoundBase>& Theme = AvailableThemes[ThemeIndex];
-			const FString ThemeLabel = ShortenForRow(Theme.ToSoftObjectPath().GetAssetName(), 24);
+			const FString ThemeLabel = FitText(Roster->GetThemeLabel(Theme.ToSoftObjectPath()), PanelWidth - 24.f, SmallFontSize);
 			const bool bIsCurrentTheme = Theme.ToSoftObjectPath() == CurrentThemePath;
 			if (DrawButton(ThemeLabel, PanelX, CursorY + Slot * 28.0f, PanelWidth, 26.0f, SmallFontSize,
 			               bIsCurrentTheme))
 			{
-				Roster->SetThemeMusicPath(SelectedEntryIndex, Theme.ToSoftObjectPath());
+				if (!bIsCurrentTheme)
+				{
+					CommitFocusedText();
+					StopThemePreview();
+					Roster->SetThemeMusicPath(SelectedEntryIndex, Theme.ToSoftObjectPath());
+				}
 				SetStatus(FString::Printf(TEXT("主题曲已设为：%s"), *ThemeLabel), false);
 			}
 		}
@@ -1655,15 +2044,20 @@ void AMarbleRaceMenuHUD::DrawThemeSection(float PanelX, float& PanelY, float Pan
 		ThemePageIndex = FMath::Clamp(ThemePageIndex, 0, ThemePageCount - 1);
 	}
 
-	if (DrawButton(TEXT("清除主题曲（使用默认曲）"), PanelX, CursorY, 220.0f, 28.0f, SmallFontSize, false))
+	if (DrawButton(TEXT("清除主题曲"), PanelX, CursorY, 160.0f, 28.0f, SmallFontSize, false))
 	{
 		if (Roster)
 		{
+			CommitFocusedText();
+			StopThemePreview();
 			Roster->SetThemeMusicPath(SelectedEntryIndex, FSoftObjectPath());
-			SetStatus(TEXT("已改回默认曲"), false);
+			SetStatus(TEXT("主题曲已清除"), false);
 		}
 	}
 	PanelY = CursorY + 36.0f;
+	if (IsMouseOverRect(PanelX, PreviewStartLabelY, 136.f, 32.f))
+		DrawSettingsTooltip(TEXT("输入秒数并按回车，或使用试听当前位置。\n仅每场比赛首次播放使用；之后续播，循环从头开始。"),
+			FVector2D(PanelX, PreviewStartLabelY + 36.f), Canvas->SizeX, Canvas->SizeY);
 }
 
 void AMarbleRaceMenuHUD::DrawBottomBar(float ScreenWidth, float ScreenHeight)
@@ -1672,7 +2066,7 @@ void AMarbleRaceMenuHUD::DrawBottomBar(float ScreenWidth, float ScreenHeight)
 
 	const float BarTop = ScreenHeight - MarbleRaceMenuLayout::BottomBarHeight + 10.0f;
 	const float ButtonHeight = 40.0f;
-	const float ButtonWidth = 132.0f;
+	const float ButtonWidth = FMath::Min(132.f, (ScreenWidth - 48.f - 168.f - 50.f) / 4.f);
 	const float ButtonGap = 10.0f;
 	float ButtonX = MarbleRaceMenuLayout::Margin;
 
@@ -1741,6 +2135,19 @@ void AMarbleRaceMenuHUD::DrawBottomBar(float ScreenWidth, float ScreenHeight)
 	{
 		HandleEscapeToMainMenu();
 	}
+}
+
+FString AMarbleRaceMenuHUD::FitText(const FString& Text, const float Width, const int32 FontSize) const
+{
+	if (!GEngine || !GEngine->GetMediumFont() || !FSlateApplication::IsInitialized()) return ShortenForRow(Text, FMath::Max(4, FMath::FloorToInt(Width / FontSize)));
+	FSlateFontInfo Font = GEngine->GetMediumFont()->GetLegacySlateFontInfo();
+	Font.Size = FMath::Max(6, FontSize);
+	const auto Measure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
+	if (Measure->Measure(Text, Font).X <= Width) return Text;
+	FString Result = Text;
+	while (!Result.IsEmpty() && Measure->Measure(Result + TEXT("…"), Font).X > Width) Result.LeftChopInline(1);
+	if (!Result.IsEmpty() && Result[Result.Len() - 1] >= 0xD800 && Result[Result.Len() - 1] <= 0xDBFF) Result.LeftChopInline(1);
+	return Result + TEXT("…");
 }
 
 FString AMarbleRaceMenuHUD::ShortenForRow(const FString& InText, int32 MaxCharacters)

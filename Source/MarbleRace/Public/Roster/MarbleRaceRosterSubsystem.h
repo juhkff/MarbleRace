@@ -53,6 +53,8 @@ public:
 	bool SetEnabled(int32 Index, bool bInEnabled);
 	bool SetThemeMusic(int32 Index, USoundBase* Music);
 	bool SetThemeMusicPath(int32 Index, const FSoftObjectPath& MusicPath);
+	bool SetThemeStartTime(int32 Index, float Seconds);
+	float GetThemeDuration(int32 Index) const;
 
 	/**
 	 * 从磁盘导入图片，把字节存进条目，并刷新缓存的缩略图。
@@ -72,6 +74,7 @@ public:
 
 	/** 某条目主题曲的可读名称。没设置时是占位文字。 */
 	FString GetThemeDisplayName(int32 Index) const;
+	FString GetThemeLabel(const FSoftObjectPath& Path) const;
 
 	/** Saved/Portraits 里的图片，作为一键选用的头像来源。 */
 	void RefreshPortraitFolder();
@@ -84,6 +87,9 @@ public:
 	/** 恢复内置的默认小球。没有存档时使用。 */
 	void ResetToDefaults();
 
+	/** 加载默认名单配置；头像与音乐可省略，失败时保留现有名单。不写用户存档。 */
+	bool LoadRosterFromManifest(const FString& ManifestPath);
+
 private:
 	UPROPERTY(Transient)
 	TArray<FRaceCharacterEntry> Entries;
@@ -94,6 +100,7 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<TSoftObjectPtr<USoundBase>> AvailableThemes;
+	TMap<FSoftObjectPath, FString> ThemeLabels;
 
 	UPROPERTY(Transient)
 	TArray<FString> PortraitFolderFiles;

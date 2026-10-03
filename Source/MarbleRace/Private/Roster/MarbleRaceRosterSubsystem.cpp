@@ -2,13 +2,18 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/Texture2D.h"
+#include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
 #include "ImageUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Roster/RaceRosterSave.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Sound/SoundBase.h"
+#include "Sound/SoundWave.h"
+#include "Race/MarbleThemePlayback.h"
 
 namespace
 {
@@ -25,8 +30,6 @@ namespace
 
 	constexpr int32 GRacePaletteSize = UE_ARRAY_COUNT(GRacePalette);
 
-	/** 数量够填满滚筒，第一次运行不用先做设置。 */
-	constexpr int32 GDefaultEntryCount = 30;
 }
 
 FLinearColor UMarbleRaceRosterSubsystem::GetPaletteColor(int32 PaletteIndex)
@@ -168,6 +171,7 @@ bool UMarbleRaceRosterSubsystem::SetColor(int32 Index, const FLinearColor& NewCo
 		return false;
 	}
 	Entries[Index].Color = NewColor;
+	Entries[Index].Color.A = 1.f;
 	SaveRoster();
 	return true;
 }
@@ -190,6 +194,8 @@ bool UMarbleRaceRosterSubsystem::SetThemeMusic(int32 Index, USoundBase* Music)
 		return false;
 	}
 	Entries[Index].ThemeMusic = Music;
+	Entries[Index].ThemeTitle.Reset();
+	Entries[Index].ThemeStartTimeSeconds = 0.f;
 	SaveRoster();
 	return true;
 }
@@ -201,8 +207,26 @@ bool UMarbleRaceRosterSubsystem::SetThemeMusicPath(int32 Index, const FSoftObjec
 		return false;
 	}
 	Entries[Index].ThemeMusic = TSoftObjectPtr<USoundBase>(MusicPath);
+	Entries[Index].ThemeTitle.Reset();
+	Entries[Index].ThemeStartTimeSeconds = 0.f;
 	SaveRoster();
 	return true;
+}
+
+float UMarbleRaceRosterSubsystem::GetThemeDuration(int32 Index) const
+{
+	if (!Entries.IsValidIndex(Index)) return 0.f;
+	USoundBase* Music = Entries[Index].ThemeMusic.LoadSynchronous();
+	const USoundWave* Wave = Cast<USoundWave>(Music);
+	const float Duration = Wave ? Wave->Duration : Music ? Music->GetDuration() : 0.f;
+	return FMath::IsFinite(Duration) && Duration > 0.f ? Duration : 0.f;
+}
+
+bool UMarbleRaceRosterSubsystem::SetThemeStartTime(int32 Index, float Seconds)
+{
+	if (!Entries.IsValidIndex(Index) || !FMath::IsFinite(Seconds)) return false;
+	Entries[Index].ThemeStartTimeSeconds = FMarbleThemePlayback::ClampStartTime(Seconds, GetThemeDuration(Index));
+	return SaveRoster();
 }
 
 bool UMarbleRaceRosterSubsystem::SetPortraitFromFile(int32 Index, const FString& SourcePath, FString& OutError)
@@ -249,6 +273,7 @@ bool UMarbleRaceRosterSubsystem::ClearPortrait(int32 Index)
 	}
 	Entries[Index].PortraitPngData.Reset();
 	Entries[Index].PortraitSourcePath.Reset();
+	Entries[Index].BuiltInPortrait.Reset();
 	PortraitCache.Remove(Index);
 	SaveRoster();
 	return true;
@@ -284,7 +309,9 @@ UTexture2D* UMarbleRaceRosterSubsystem::GetPortraitTexture(int32 Index)
 		return nullptr;
 	}
 
-	UTexture2D* Built = BuildPortraitTexture(Entries[Index].PortraitPngData);
+	UTexture2D* Built = Entries[Index].PortraitPngData.IsEmpty()
+		? Entries[Index].BuiltInPortrait.LoadSynchronous()
+		: BuildPortraitTexture(Entries[Index].PortraitPngData);
 	if (Built)
 	{
 		PortraitCache.Add(Index, Built);
@@ -295,6 +322,28 @@ UTexture2D* UMarbleRaceRosterSubsystem::GetPortraitTexture(int32 Index)
 void UMarbleRaceRosterSubsystem::RefreshAvailableThemes()
 {
 	AvailableThemes.Reset();
+	ThemeLabels.Reset();
+	FString Json;
+	TSharedPtr<FJsonObject> Manifest;
+	const TArray<TSharedPtr<FJsonValue>>* Characters = nullptr;
+	for (const TCHAR* RelativePath : {TEXT("Roster/default_roster.json"), TEXT("GGST/roster.json"), TEXT("Roster/local_roster.json")})
+	{
+		if (FFileHelper::LoadFileToString(Json, *(FPaths::ProjectConfigDir() / RelativePath)) &&
+			FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Manifest) && Manifest.IsValid() &&
+			Manifest->TryGetArrayField(TEXT("characters"), Characters))
+		{
+			for (const auto& Value : *Characters)
+			{
+				const TSharedPtr<FJsonObject> Character = Value->AsObject();
+				FString Path, Name, Title;
+				if (Character.IsValid() && Character->TryGetStringField(TEXT("music_asset"), Path) &&
+					Character->TryGetStringField(TEXT("name"), Name) && Character->TryGetStringField(TEXT("theme_title"), Title))
+				{
+					ThemeLabels.Add(FSoftObjectPath(Path), Name + TEXT(" · ") + Title);
+				}
+			}
+		}
+	}
 
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
@@ -303,12 +352,16 @@ void UMarbleRaceRosterSubsystem::RefreshAvailableThemes()
 	Filter.ClassPaths.Add(USoundBase::StaticClass()->GetClassPathName());
 	Filter.bRecursiveClasses = true;
 	Filter.bRecursivePaths = true;
+	Filter.PackagePaths.Add(FName(TEXT("/Game")));
 
 	TArray<FAssetData> Found;
 	AssetRegistry.GetAssets(Filter, Found);
 
-	Found.Sort([](const FAssetData& A, const FAssetData& B)
+	Found.Sort([this](const FAssetData& A, const FAssetData& B)
 	{
+		const bool bBuiltInA = ThemeLabels.Contains(A.ToSoftObjectPath());
+		const bool bBuiltInB = ThemeLabels.Contains(B.ToSoftObjectPath());
+		if (bBuiltInA != bBuiltInB) return bBuiltInA;
 		return A.AssetName.LexicalLess(B.AssetName);
 	});
 
@@ -330,9 +383,19 @@ FString UMarbleRaceRosterSubsystem::GetThemeDisplayName(int32 Index) const
 	const TSoftObjectPtr<USoundBase>& Music = Entries[Index].ThemeMusic;
 	if (Music.IsNull())
 	{
-		return TEXT("（未设置，使用默认曲）");
+		return TEXT("（未设置）");
 	}
-	return Music.ToSoftObjectPath().GetAssetName();
+	if (!Entries[Index].ThemeTitle.IsEmpty())
+	{
+		return Entries[Index].ThemeTitle;
+	}
+	return GetThemeLabel(Music.ToSoftObjectPath());
+}
+
+FString UMarbleRaceRosterSubsystem::GetThemeLabel(const FSoftObjectPath& Path) const
+{
+	if (const FString* Label = ThemeLabels.Find(Path)) return *Label;
+	return Path.GetAssetName();
 }
 
 FString UMarbleRaceRosterSubsystem::GetPortraitFolderPath()
@@ -376,7 +439,7 @@ bool UMarbleRaceRosterSubsystem::SaveRoster()
 		return false;
 	}
 
-	Save->Version = 1;
+	Save->Version = 2;
 	Save->Entries = Entries;
 	const bool bSaved = UGameplayStatics::SaveGameToSlot(Save, GetSaveSlotName(), 0);
 	if (!bSaved)
@@ -395,13 +458,31 @@ bool UMarbleRaceRosterSubsystem::LoadRoster()
 
 	URaceRosterSave* Save = Cast<URaceRosterSave>(
 		UGameplayStatics::LoadGameFromSlot(GetSaveSlotName(), 0));
-	if (!Save || Save->Version != 1)
+	if (Save && Save->Version == 1 && FPaths::FileExists(FPaths::ProjectConfigDir() / TEXT("GGST/roster.json")))
+	{
+		// 用户要求替换当前旧名单。先保留完整旧存档，再创建 GGST 名单。
+		if (!UGameplayStatics::SaveGameToSlot(Save, TEXT("MarbleRaceRoster_PreGGST"), 0))
+		{
+			UE_LOG(LogTemp, Error, TEXT("旧名单备份失败，保留旧名单"));
+			Entries = Save->Entries;
+			NextPaletteIndex = Entries.Num();
+			return true;
+		}
+		return false;
+	}
+	if (!Save || (Save->Version != 1 && Save->Version != 2))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("角色名单存档存在但无法使用，将重建默认名单"));
 		return false;
 	}
 
 	Entries = Save->Entries;
+	for (FRaceCharacterEntry& Entry : Entries)
+	{
+		Entry.Color.A = 1.f;
+		if (!FMath::IsFinite(Entry.ThemeStartTimeSeconds) || Entry.ThemeStartTimeSeconds < 0.f)
+			Entry.ThemeStartTimeSeconds = 0.f;
+	}
 	// 调色板序号一直往前走，新小球不会偶然用回同一种颜色。
 	NextPaletteIndex = Entries.Num();
 	UE_LOG(LogTemp, Log, TEXT("角色名单已载入：%d 个小球"), Entries.Num());
@@ -410,17 +491,73 @@ bool UMarbleRaceRosterSubsystem::LoadRoster()
 
 void UMarbleRaceRosterSubsystem::ResetToDefaults()
 {
-	Entries.Reset();
-	PortraitCache.Reset();
-
-	for (int32 Index = 0; Index < GDefaultEntryCount; ++Index)
+	for (const TCHAR* RelativePath : {TEXT("Roster/local_roster.json"), TEXT("GGST/roster.json"), TEXT("Roster/default_roster.json")})
 	{
-		FRaceCharacterEntry Entry;
-		Entry.Color = GetPaletteColor(Index);
-		Entry.DisplayName = FString::Printf(TEXT("小球 %d"), Index + 1);
-		Entries.Add(Entry);
+		if (LoadRosterFromManifest(FPaths::ProjectConfigDir() / RelativePath)) return;
 	}
 
+	// A missing or malformed theme pack must not leave the game with zero marbles.
+	Entries.Reset();
+	PortraitCache.Reset();
+	for (int32 Index = 0; Index < GRacePaletteSize; ++Index)
+	{
+		FRaceCharacterEntry Entry;
+		Entry.DisplayName = FString::Printf(TEXT("小球 %d"), Index + 1);
+		Entry.Color = GetPaletteColor(Index);
+		Entries.Add(Entry);
+	}
 	NextPaletteIndex = Entries.Num();
-	UE_LOG(LogTemp, Log, TEXT("角色名单为空，已创建 %d 个默认小球"), Entries.Num());
+}
+
+bool UMarbleRaceRosterSubsystem::LoadRosterFromManifest(const FString& ManifestPath)
+{
+	FString Json;
+	TSharedPtr<FJsonObject> Manifest;
+	if (!FFileHelper::LoadFileToString(Json, *ManifestPath) ||
+		!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Manifest) || !Manifest.IsValid())
+	{
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* Characters = nullptr;
+	if (!Manifest->TryGetArrayField(TEXT("characters"), Characters))
+	{
+		return false;
+	}
+	TArray<FRaceCharacterEntry> LoadedEntries;
+	for (const TSharedPtr<FJsonValue>& Value : *Characters)
+	{
+		const TSharedPtr<FJsonObject>* Character = nullptr;
+		if (!Value->TryGetObject(Character) || !Character || !Character->IsValid())
+		{
+			continue;
+		}
+		FString Id, Name, Color, Portrait, Music, Theme;
+		if (!(*Character)->TryGetStringField(TEXT("name"), Name) || Name.IsEmpty())
+		{
+			continue;
+		}
+		(*Character)->TryGetStringField(TEXT("id"), Id);
+		(*Character)->TryGetStringField(TEXT("color"), Color);
+		(*Character)->TryGetStringField(TEXT("portrait_asset"), Portrait);
+		(*Character)->TryGetStringField(TEXT("music_asset"), Music);
+		(*Character)->TryGetStringField(TEXT("theme_title"), Theme);
+		FRaceCharacterEntry Entry;
+		Entry.CharacterId = Id;
+		Entry.DisplayName = Name;
+		Entry.Color = Color.IsEmpty() ? GetPaletteColor(LoadedEntries.Num()) : FLinearColor::FromSRGBColor(FColor::FromHex(Color));
+		Entry.Color.A = 1.f;
+		Entry.BuiltInPortrait = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(Portrait));
+		Entry.PortraitSourcePath = Portrait;
+		Entry.ThemeMusic = TSoftObjectPtr<USoundBase>(FSoftObjectPath(Music));
+		Entry.ThemeTitle = Theme;
+		(*Character)->TryGetBoolField(TEXT("enabled"), Entry.bEnabled);
+		LoadedEntries.Add(Entry);
+	}
+
+	if (LoadedEntries.IsEmpty()) return false;
+	Entries = MoveTemp(LoadedEntries);
+	PortraitCache.Reset();
+	NextPaletteIndex = Entries.Num();
+	UE_LOG(LogTemp, Log, TEXT("已创建 %d 个默认角色弹珠：%s"), Entries.Num(), *ManifestPath);
+	return true;
 }

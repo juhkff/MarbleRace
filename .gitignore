@@ -36,3 +36,16 @@ Thumbs.db
 /inited.json
 /list.json
 /%SystemDrive%/
+
+# 可替换的本地主题素材；仓库只保留框架、材质和通用名单模板。
+/Content/GGST/Portraits/
+/Content/GGST/Music/
+/SourceAssets/GGST/
+/Config/GGST/
+/Config/Roster/local_roster.json
+/Config/Roster/local_music_levels.json
+/Content/LocalMedia/
+/SourceAssets/LocalMedia/
+
+# 可选录制工具，按 Tools/FFmpeg/README.md 单独安装。
+/Tools/FFmpeg/*.exe

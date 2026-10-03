@@ -83,6 +83,8 @@ void URelocationManagerComponent::EnqueueMarble(AActor* Marble, UPrimitiveCompon
 	Entry.bHadGravity = Body->IsGravityEnabled();
 	Entry.bWasHidden = Marble->IsHidden();
 	Entry.bAlwaysCreatedPhysicsState = Body->bAlwaysCreatePhysicsState;
+	if (auto* Manager = Cast<ARelocationManagerActor>(GetOwner()))
+		Entry.bHasPlannedRespawnPosition = Manager->TryRollRespawnLocation(Marble, Entry.PlannedRespawnPosition);
 
 	// 暂停原对象而不是销毁它，保留赛程中的弹珠身份和材质。
 	// 暂停期间仍保留真实碰撞几何用于落点查询，但自身不参与场景碰撞。
@@ -93,6 +95,17 @@ void URelocationManagerComponent::EnqueueMarble(AActor* Marble, UPrimitiveCompon
 	PendingMarbles.Add(Entry);
 	UE_LOG(LogTemp, Log, TEXT("重定位管理器 %s：弹珠 %s 入队，等待 %d 颗"),
 	       *GetOwner()->GetName(), *Marble->GetName(), PendingMarbles.Num());
+}
+
+bool URelocationManagerComponent::GetQueuedMarblePosition(const AActor* Marble, FVector& OutPosition) const
+{
+	for (const FPendingMarbleRelocation& Entry : PendingMarbles)
+		if (Entry.Marble == Marble && Entry.bHasPlannedRespawnPosition)
+		{
+			OutPosition = Entry.PlannedRespawnPosition;
+			return true;
+		}
+	return false;
 }
 
 bool URelocationManagerComponent::IsRespawnClear(const FPendingMarbleRelocation& Entry, const FVector& Position) const
@@ -261,13 +274,14 @@ void URelocationManagerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	// 按入队顺序检查各球自己的出口，阻塞的出口不妨碍其他出口。
 	for (int32 ReleaseIndex = 0; ReleaseIndex < PendingMarbles.Num(); ++ReleaseIndex)
 	{
-	const FPendingMarbleRelocation& First = PendingMarbles[ReleaseIndex];
+	FPendingMarbleRelocation& First = PendingMarbles[ReleaseIndex];
 	if (!IsValid(First.Marble) || !IsValid(First.Body)) continue;
-	FVector Position;
-	if (!Manager->TryRollRespawnLocation(First.Marble, Position))
+	if (!First.bHasPlannedRespawnPosition)
 	{
-		continue;
+		First.bHasPlannedRespawnPosition = Manager->TryRollRespawnLocation(First.Marble, First.PlannedRespawnPosition);
+		if (!First.bHasPlannedRespawnPosition) continue;
 	}
+	const FVector Position = First.PlannedRespawnPosition;
 	const bool bClear = IsRespawnClear(First, Position);
 	if (!bClear)
 	{
@@ -279,7 +293,14 @@ void URelocationManagerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 			LogRespawnBlocked(First, Position);
 		}
 	}
-	if (!bClear) continue;
+	if (!bClear)
+	{
+		// Retain the existing ability to escape an obstructed random spawn area.
+		// Only a release attempt can change the plan; ranking queries are read-only.
+		if (Manager->bEnableRandomRespawn)
+			First.bHasPlannedRespawnPosition = Manager->TryRollRespawnLocation(First.Marble, First.PlannedRespawnPosition);
+		continue;
+	}
 
 	// 放出最早能够重生的球，仅在成功后推进该球的轮询索引。
 	const FPendingMarbleRelocation Releasing = First;

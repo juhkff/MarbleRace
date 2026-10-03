@@ -12,7 +12,7 @@ class MARBLERACE_API URaceRosterSave : public USaveGame
 	GENERATED_BODY()
 
 public:
-	/** 条目结构变化时把版本号加一，以便迁移或忽略旧存档。 */
+	/** 保持旧读取默认值：旧存档可能省略与默认值相同的字段。新存档显式写入版本 2。 */
 	UPROPERTY(SaveGame)
 	int32 Version = 1;
 

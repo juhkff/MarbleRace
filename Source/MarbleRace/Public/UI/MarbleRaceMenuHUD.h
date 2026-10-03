@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/HUD.h"
+#include "Race/MarbleThemePlayback.h"
 #include "MarbleRaceMenuHUD.generated.h"
 
 class FMarbleRaceMenuImeContext;
@@ -9,6 +10,7 @@ class FMarbleRaceMenuWheelProcessor;
 class SWidget;
 class UMarbleRaceRosterSubsystem;
 class UTexture2D;
+class UAudioComponent;
 struct FKey;
 
 /** 画布菜单当前画的是哪一页。 */
@@ -16,7 +18,8 @@ UENUM(BlueprintType, meta=(DisplayName="菜单页面"))
 enum class EMarbleRaceMenuPage : uint8
 {
 	MainMenu		UMETA(DisplayName="主菜单"),
-	CharacterSetup	UMETA(DisplayName="角色设置")
+	CharacterSetup	UMETA(DisplayName="角色设置"),
+	GameSettings UMETA(DisplayName="游戏设置")
 };
 
 /** 当前接收输入的文本框。 */
@@ -25,7 +28,8 @@ enum class EMarbleRaceMenuTextField : uint8
 {
 	None UMETA(DisplayName="无"),
 	DisplayName UMETA(DisplayName="姓名"),
-	PortraitPath UMETA(DisplayName="头像路径")
+	PortraitPath UMETA(DisplayName="头像路径"),
+	MusicStartTime UMETA(DisplayName="首次播放起点")
 };
 
 /**
@@ -45,6 +49,7 @@ public:
 	AMarbleRaceMenuHUD();
 
 	virtual void DrawHUD() override;
+	virtual void Tick(float DeltaSeconds) override;
 
 	/** “开始游戏”要打开的关卡。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="菜单", meta=(DisplayName="比赛关卡名"))
@@ -136,6 +141,9 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	friend class FMarbleMenuRenderingTest;
+	friend class FMarbleMusicPreviewTest;
+	friend class FMarbleExitRecordingTest;
 	/** 输入法上下文直接读写当前获得焦点的文本。 */
 	friend class FMarbleRaceMenuImeContext;
 
@@ -147,6 +155,11 @@ private:
 	int32 SelectedEntryIndex = INDEX_NONE;
 	int32 ThemePageIndex = 0;
 	int32 PortraitFilePageIndex = 0;
+	int32 DetailTabIndex = 0;
+	float DetailBottom = 0.f;
+	int32 SettingsTabIndex = 0;
+	int32 HoveredSettingIndex = INDEX_NONE;
+	double SettingHoverStartedAt = 0.0;
 
 	/** 第一条可见名单行的像素偏移。 */
 	float RosterScrollOffset = 0.0f;
@@ -165,6 +178,7 @@ private:
 	EMarbleRaceMenuTextField FocusedTextField = EMarbleRaceMenuTextField::None;
 	FString NameEditBuffer;
 	FString PathEditBuffer;
+	FString MusicStartEditBuffer;
 	int32 CompositionBeginIndex = INDEX_NONE;
 	int32 CompositionLength = 0;
 
@@ -179,6 +193,8 @@ private:
 	/** 每帧只消费一次点击：第一个包含这次按下的控件把它用掉。 */
 	bool bClickConsumedThisFrame = false;
 	bool bAppliedMouseInputMode = false;
+	bool bQuitRequested = false;
+	bool bQuitIssued = false;
 
 	/** 标成 mutable，让只读的绘制函数也能在第一次用到时解析它。 */
 	mutable TWeakObjectPtr<UMarbleRaceRosterSubsystem> CachedRoster;
@@ -186,6 +202,19 @@ private:
 	TSharedPtr<FMarbleRaceMenuWheelProcessor> WheelProcessor;
 	TSharedPtr<FMarbleRaceMenuImeContext> ImeContext;
 	bool bImeContextActive = false;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> PreviewPlayer;
+	FSoftObjectPath PreviewMusicPath;
+	FMarbleThemePlayback PreviewPlayback;
+	bool bPreviewPlaying = false;
+	bool bDraggingThemeSeek = false;
+	bool bResumeAfterThemeSeek = false;
+	void EnsureThemePreview();
+	void StopThemePreview();
+	void ToggleThemePreview(double Now);
+	void SeekThemePreview(double Seconds, double Now);
+	void DrawThemePreview(float PanelX, float& PanelY, float PanelWidth);
 
 	//~ 子系统和输入 ~
 	/** 每一行绘制都会用到，所以做了缓存。不假设它一定存在。 */
@@ -198,6 +227,9 @@ private:
 
 	void HandleEscapeToMainMenu();
 	void RequestQuit();
+	bool CanCompleteQuit() const;
+	void CompleteQuitIfReady();
+	void DrawRecordingExitPage(float ScreenWidth, float ScreenHeight);
 	void EnterCharacterSetupPage();
 	void FocusTextField(EMarbleRaceMenuTextField Field);
 	void CommitFocusedText();
@@ -241,6 +273,8 @@ private:
 
 	void DrawMainMenuPage(float ScreenWidth, float ScreenHeight);
 	void DrawCharacterSetupPage(float ScreenWidth, float ScreenHeight);
+	void DrawGameSettingsPage(float ScreenWidth, float ScreenHeight);
+	void DrawSettingsTooltip(const FString& Text, const FVector2D& Anchor, float ScreenWidth, float ScreenHeight);
 	void DrawRosterList(float ListX, float ListY, float ListWidth, float ListHeight);
 	void DrawRosterRow(int32 EntryIndex, float RowX, float RowY, float RowWidth, float RowHeight);
 	void DrawEntrySettings(float PanelX, float& PanelY, float PanelWidth);
@@ -252,4 +286,5 @@ private:
 
 	/** 截短过长的文件名或资源名，避免一行冲到旁边去。 */
 	static FString ShortenForRow(const FString& InText, int32 MaxCharacters);
+	FString FitText(const FString& Text, float Width, int32 FontSize) const;
 };

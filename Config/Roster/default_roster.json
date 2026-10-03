@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "characters": [
+    {"id": "marble01", "name": "小球 1", "color": "#E84D3D"},
+    {"id": "marble02", "name": "小球 2", "color": "#3370DB"},
+    {"id": "marble03", "name": "小球 3", "color": "#5CC252"},
+    {"id": "marble04", "name": "小球 4", "color": "#F2BD33"},
+    {"id": "marble05", "name": "小球 5", "color": "#9E54D4"},
+    {"id": "marble06", "name": "小球 6", "color": "#29B8BD"},
+    {"id": "marble07", "name": "小球 7", "color": "#F078B5"},
+    {"id": "marble08", "name": "小球 8", "color": "#8C949E"},
+    {"id": "marble09", "name": "小球 9", "color": "#6B4D38"},
+    {"id": "marble10", "name": "小球 10", "color": "#B8DB3D"},
+    {"id": "marble11", "name": "小球 11", "color": "#404052"},
+    {"id": "marble12", "name": "小球 12", "color": "#FA9438"}
+  ]
+}
